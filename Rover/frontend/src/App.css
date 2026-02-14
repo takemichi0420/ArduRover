@@ -71,6 +71,29 @@ input[type="range"] {
   gap: 8px;
 }
 
+.map-mode {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.map-mode button {
+  background: #64748b;
+}
+
+.map-mode button.active {
+  background: #0ea5e9;
+}
+
+.map-mode button:hover {
+  background: #475569;
+}
+
+.map-mode button.active:hover {
+  background: #0284c7;
+}
+
 button {
   border: 0;
   border-radius: 8px;

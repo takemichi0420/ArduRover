@@ -8,6 +8,24 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? `${API_PROTO}://${DEFAULT_HOST
 const WS_URL = import.meta.env.VITE_WS_URL ?? `${WS_PROTO}://${DEFAULT_HOST}:8000/ws/telemetry`;
 const DEFAULT_LAT = Number(import.meta.env.VITE_DEFAULT_LAT ?? 35.0);
 const DEFAULT_LON = Number(import.meta.env.VITE_DEFAULT_LON ?? 139.0);
+const BASE_MAPS = {
+  default: {
+    label: "標準",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+  },
+  satellite: {
+    label: "衛星",
+    attribution: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+  },
+  topo: {
+    label: "等高線",
+    attribution:
+      "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)",
+    url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
+  }
+};
 
 function fmt(value, digits = 3) {
   if (value === null || value === undefined) return "-";
@@ -60,6 +78,7 @@ export default function App() {
   const [throttle, setThrottle] = useState(0);
   const [steer, setSteer] = useState(0);
   const [followMap, setFollowMap] = useState(true);
+  const [baseMap, setBaseMap] = useState("satellite");
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -126,6 +145,7 @@ export default function App() {
     if (hasCoord(homeLat, homeLon)) return [homeLat, homeLon];
     return [DEFAULT_LAT, DEFAULT_LON];
   }, [lat, lon, homeLat, homeLon]);
+  const selectedBaseMap = BASE_MAPS[baseMap] ?? BASE_MAPS.satellite;
 
   const sendCurrent = async () => {
     try {
@@ -152,7 +172,7 @@ export default function App() {
   return (
     <main className="page">
       <section className="panel left">
-        <h1>Rover GCS MVP</h1>
+        <h1>Rover GCS</h1>
         <p className="meta">WebSocket: {status}</p>
         <p className="meta">HTTP Poll: {apiStatus}</p>
         <p className="meta">SYS/COMP: {telemetry?.target_system ?? "-"} / {telemetry?.target_component ?? "-"}</p>
@@ -165,6 +185,29 @@ export default function App() {
           <p>Yaw: {fmt(telemetry?.attitude?.yaw_rad, 3)} rad</p>
           <p>GPS Fix: {telemetry?.gps?.fix_type ?? "-"} (Sat {telemetry?.gps?.satellites_visible ?? "-"})</p>
           <p>Battery: {fmt(telemetry?.battery?.voltage_v, 2)} V ({telemetry?.battery?.remaining_pct ?? "-"}%)</p>
+          <div className="map-mode">
+            <button
+              type="button"
+              className={baseMap === "default" ? "active" : ""}
+              onClick={() => setBaseMap("default")}
+            >
+              地図: {BASE_MAPS.default.label}
+            </button>
+            <button
+              type="button"
+              className={baseMap === "satellite" ? "active" : ""}
+              onClick={() => setBaseMap("satellite")}
+            >
+              地図: {BASE_MAPS.satellite.label}
+            </button>
+            <button
+              type="button"
+              className={baseMap === "topo" ? "active" : ""}
+              onClick={() => setBaseMap("topo")}
+            >
+              地図: {BASE_MAPS.topo.label}
+            </button>
+          </div>
           <div className="actions" style={{ marginTop: 8 }}>
             <button onClick={() => setFollowMap((v) => !v)}>
               {followMap ? "Map Follow: ON" : "Map Follow: OFF"}
@@ -198,8 +241,8 @@ export default function App() {
         <MapContainer center={[DEFAULT_LAT, DEFAULT_LON]} zoom={18} className="map" scrollWheelZoom>
           <MapAutoCenter center={mapCenter} enabled={followMap} />
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution={selectedBaseMap.attribution}
+            url={selectedBaseMap.url}
           />
           {hasCoord(lat, lon) ? (
             <CircleMarker center={[lat, lon]} radius={8} pathOptions={{ color: "#ef4444" }}>

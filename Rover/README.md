@@ -1,4 +1,4 @@
-# Rover GCS MVP
+# Rover GCS
 
 SITL (ArduRover) と Web ベース GCS の最小構成です。
 
