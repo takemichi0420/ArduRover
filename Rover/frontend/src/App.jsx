@@ -6,6 +6,8 @@ const API_PROTO = window.location.protocol === "https:" ? "https" : "http";
 const WS_PROTO = window.location.protocol === "https:" ? "wss" : "ws";
 const API_BASE = import.meta.env.VITE_API_BASE ?? `${API_PROTO}://${DEFAULT_HOST}:8000`;
 const WS_URL = import.meta.env.VITE_WS_URL ?? `${WS_PROTO}://${DEFAULT_HOST}:8000/ws/telemetry`;
+const VIDEO_WS_STREAM_URL = import.meta.env.VITE_VIDEO_WS_STREAM_URL ?? `${WS_PROTO}://${DEFAULT_HOST}:8000/ws/video/stream`;
+const PHONE_CAMERA_PAGE_URL = `${window.location.origin}/phone-camera.html`;
 const DEFAULT_LAT = Number(import.meta.env.VITE_DEFAULT_LAT ?? 35.0);
 const DEFAULT_LON = Number(import.meta.env.VITE_DEFAULT_LON ?? 139.0);
 const BASE_MAPS = {
@@ -144,12 +146,15 @@ export default function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [status, setStatus] = useState("connecting");
   const [apiStatus, setApiStatus] = useState("idle");
+  const [videoStatus, setVideoStatus] = useState("connecting");
+  const [videoUrl, setVideoUrl] = useState("");
   const [error, setError] = useState("");
   const [followMap, setFollowMap] = useState(true);
   const [baseMap, setBaseMap] = useState("satellite");
   const [webControlEnabled, setWebControlEnabled] = useState(false);
   const [stick, setStick] = useState({ xNorm: 0, yNorm: 0 });
   const sendingRef = useRef(false);
+  const videoObjectUrlRef = useRef("");
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -203,6 +208,40 @@ export default function App() {
       if (timerId) {
         window.clearTimeout(timerId);
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    const ws = new WebSocket(VIDEO_WS_STREAM_URL);
+    ws.binaryType = "blob";
+
+    ws.onopen = () => setVideoStatus("connected");
+    ws.onmessage = (event) => {
+      const blob = event.data instanceof Blob ? event.data : new Blob([event.data], { type: "image/jpeg" });
+      const nextUrl = URL.createObjectURL(blob);
+      if (videoObjectUrlRef.current) {
+        URL.revokeObjectURL(videoObjectUrlRef.current);
+      }
+      videoObjectUrlRef.current = nextUrl;
+      setVideoUrl(nextUrl);
+    };
+    ws.onerror = () => setVideoStatus("error");
+    ws.onclose = () => setVideoStatus("closed");
+
+    const pingId = window.setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send("ping");
+      }
+    }, 10000);
+
+    return () => {
+      window.clearInterval(pingId);
+      ws.close();
+      if (videoObjectUrlRef.current) {
+        URL.revokeObjectURL(videoObjectUrlRef.current);
+        videoObjectUrlRef.current = "";
+      }
+      setVideoUrl("");
     };
   }, []);
 
@@ -316,6 +355,19 @@ export default function App() {
               {followMap ? "Map Follow: ON" : "Map Follow: OFF"}
             </button>
           </div>
+        </div>
+
+        <div className="card">
+          <h2>Camera</h2>
+          <p className="meta">Video WS: {videoStatus}</p>
+          {videoUrl ? (
+            <img className="camera-frame" src={videoUrl} alt="Phone camera stream" />
+          ) : (
+            <div className="camera-placeholder">No stream. Open phone camera publisher and press Start.</div>
+          )}
+          <a className="camera-link" href={PHONE_CAMERA_PAGE_URL} target="_blank" rel="noreferrer">
+            {PHONE_CAMERA_PAGE_URL}
+          </a>
         </div>
 
         <div className="card">

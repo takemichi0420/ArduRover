@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Phone Camera Publisher</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: "Noto Sans JP", "Segoe UI", sans-serif;
+        background: #e2e8f0;
+        color: #0f172a;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 1.35rem;
+      }
+      .card {
+        background: #fff;
+        border: 1px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 12px;
+        margin-top: 12px;
+      }
+      .controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      label,
+      select,
+      input,
+      button {
+        font-size: 0.95rem;
+      }
+      label {
+        display: block;
+        margin: 6px 0;
+      }
+      input,
+      select,
+      button {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid #94a3b8;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      button {
+        border: 0;
+        background: #0284c7;
+        color: #fff;
+        font-weight: 600;
+      }
+      button:disabled {
+        opacity: 0.5;
+      }
+      #preview {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid #94a3b8;
+        background: #0f172a;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+      }
+      #status {
+        font-weight: 700;
+        margin: 0;
+      }
+      .hint {
+        margin: 6px 0;
+        color: #334155;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Phone Camera Publisher</h1>
+      <p class="hint">このページをスマホで開いて Start を押すと、Web GCS の Camera パネルへ配信します。</p>
+
+      <div class="card">
+        <label>
+          Video Publish WS URL
+          <input id="wsUrl" />
+        </label>
+        <label>
+          Camera
+          <select id="facingMode">
+            <option value="environment">Back</option>
+            <option value="user">Front</option>
+          </select>
+        </label>
+        <div class="controls">
+          <button id="startBtn" type="button">Start</button>
+          <button id="stopBtn" type="button" disabled>Stop</button>
+        </div>
+        <p id="status">Status: idle</p>
+      </div>
+
+      <div class="card">
+        <video id="preview" autoplay playsinline muted></video>
+        <p class="hint">同一ネットワーク上で GCS backend（port 8000）に到達できることを確認してください。</p>
+      </div>
+      <canvas id="canvas" hidden></canvas>
+    </main>
+
+    <script>
+      const wsUrlInput = document.getElementById("wsUrl");
+      const facingModeSelect = document.getElementById("facingMode");
+      const startBtn = document.getElementById("startBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const statusEl = document.getElementById("status");
+      const preview = document.getElementById("preview");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+
+      const wsProto = location.protocol === "https:" ? "wss" : "ws";
+      const host = location.hostname || "127.0.0.1";
+      wsUrlInput.value = `${wsProto}://${host}:8000/ws/video/publish`;
+
+      let stream = null;
+      let ws = null;
+      let timerId = null;
+      let busy = false;
+
+      const setStatus = (text) => {
+        statusEl.textContent = `Status: ${text}`;
+      };
+
+      async function sendFrame() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!preview.videoWidth || !preview.videoHeight) return;
+        if (busy) return;
+
+        busy = true;
+        canvas.width = preview.videoWidth;
+        canvas.height = preview.videoHeight;
+        ctx.drawImage(preview, 0, 0, canvas.width, canvas.height);
+
+        canvas.toBlob(async (blob) => {
+          try {
+            if (!blob || !ws || ws.readyState !== WebSocket.OPEN) return;
+            const buffer = await blob.arrayBuffer();
+            ws.send(buffer);
+          } catch (err) {
+            console.error(err);
+          } finally {
+            busy = false;
+          }
+        }, "image/jpeg", 0.7);
+      }
+
+      async function start() {
+        startBtn.disabled = true;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: facingModeSelect.value },
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            },
+            audio: false
+          });
+          preview.srcObject = stream;
+
+          ws = new WebSocket(wsUrlInput.value);
+          ws.binaryType = "arraybuffer";
+          await new Promise((resolve, reject) => {
+            ws.onopen = resolve;
+            ws.onerror = () => reject(new Error("websocket open failed"));
+          });
+
+          timerId = window.setInterval(sendFrame, 180);
+          stopBtn.disabled = false;
+          setStatus("streaming");
+        } catch (err) {
+          setStatus(`error (${err.message || err})`);
+          startBtn.disabled = false;
+        }
+      }
+
+      function stop() {
+        if (timerId) {
+          clearInterval(timerId);
+          timerId = null;
+        }
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = null;
+        }
+        preview.srcObject = null;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        setStatus("stopped");
+      }
+
+      startBtn.addEventListener("click", start);
+      stopBtn.addEventListener("click", stop);
+      window.addEventListener("beforeunload", stop);
+    </script>
+  </body>
+</html>
