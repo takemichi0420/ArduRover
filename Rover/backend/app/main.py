@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import threading
 import time
@@ -124,7 +125,7 @@ class MavlinkService:
             home_lon = home.get("longitude")
             home_alt = home.get("altitude")
 
-            return {
+            snapshot = {
                 "connected": self.connected,
                 "last_seen_at": self.last_seen_at,
                 "target_system": self.master.target_system if self.master else 0,
@@ -163,6 +164,7 @@ class MavlinkService:
                     "HOME_POSITION": home,
                 },
             }
+            return _sanitize_for_json(snapshot)
 
     def send_manual_control(self, req: ManualControlRequest) -> None:
         if self.master is None:
@@ -192,6 +194,16 @@ app.add_middleware(
 mav = MavlinkService(
     connection_string=os.getenv("MAVLINK_CONNECTION", "udpin:127.0.0.1:14550")
 )
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
 
 
 @app.on_event("startup")
