@@ -48,6 +48,10 @@ function hasCoord(lat, lon) {
   return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
 }
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
 function MapAutoCenter({ center, enabled }) {
   const map = useMap();
   const prevCenterRef = useRef(null);
@@ -70,15 +74,82 @@ function MapAutoCenter({ center, enabled }) {
   return null;
 }
 
+function JoystickPad({ disabled, xNorm, yNorm, onChange, onRelease }) {
+  const padRef = useRef(null);
+  const activePointerRef = useRef(null);
+  const radius = 58;
+
+  const updateFromClient = (clientX, clientY) => {
+    const pad = padRef.current;
+    if (!pad) return;
+
+    const rect = pad.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    let dx = clientX - centerX;
+    let dy = clientY - centerY;
+    const mag = Math.hypot(dx, dy);
+    if (mag > radius && mag > 0) {
+      const scale = radius / mag;
+      dx *= scale;
+      dy *= scale;
+    }
+
+    onChange({
+      xNorm: clamp(dx / radius, -1, 1),
+      yNorm: clamp(-dy / radius, -1, 1)
+    });
+  };
+
+  const onPointerDown = (event) => {
+    if (disabled) return;
+    activePointerRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    updateFromClient(event.clientX, event.clientY);
+  };
+
+  const onPointerMove = (event) => {
+    if (disabled || activePointerRef.current !== event.pointerId) return;
+    updateFromClient(event.clientX, event.clientY);
+  };
+
+  const release = (event) => {
+    if (activePointerRef.current !== event.pointerId) return;
+    activePointerRef.current = null;
+    onRelease();
+  };
+
+  return (
+    <div
+      ref={padRef}
+      className={`joystick-pad${disabled ? " disabled" : ""}`}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={release}
+      onPointerCancel={release}
+    >
+      <div className="joystick-ring" />
+      <div
+        className="joystick-knob"
+        style={{
+          transform: `translate(calc(-50% + ${xNorm * radius}px), calc(-50% + ${-yNorm * radius}px))`
+        }}
+      />
+    </div>
+  );
+}
+
 export default function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [status, setStatus] = useState("connecting");
   const [apiStatus, setApiStatus] = useState("idle");
   const [error, setError] = useState("");
-  const [throttle, setThrottle] = useState(0);
-  const [steer, setSteer] = useState(0);
   const [followMap, setFollowMap] = useState(true);
   const [baseMap, setBaseMap] = useState("satellite");
+  const [webControlEnabled, setWebControlEnabled] = useState(false);
+  const [stick, setStick] = useState({ xNorm: 0, yNorm: 0 });
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -146,28 +217,60 @@ export default function App() {
     return [DEFAULT_LAT, DEFAULT_LON];
   }, [lat, lon, homeLat, homeLon]);
   const selectedBaseMap = BASE_MAPS[baseMap] ?? BASE_MAPS.satellite;
+  const stickX = Math.round(stick.xNorm * 1000);
+  const stickY = Math.round(stick.yNorm * 1000);
 
-  const sendCurrent = async () => {
-    try {
-      await postManualControl({
-        x: steer,
-        y: throttle,
-        z: 500,
-        r: 0,
-        buttons: 0
-      });
-    } catch (e) {
-      setError(String(e.message || e));
+  const sendManual = async (x, y) => {
+    if (!webControlEnabled) {
+      setError("Enable Web Control first");
+      return;
     }
+    await postManualControl({
+      x,
+      y,
+      z: 500,
+      r: 0,
+      buttons: 0
+    });
   };
 
   const quickCommand = async (x, y) => {
     try {
-      await postManualControl({ x, y, z: 500, r: 0, buttons: 0 });
+      await sendManual(x, y);
     } catch (e) {
       setError(String(e.message || e));
     }
   };
+
+  useEffect(() => {
+    if (!webControlEnabled) {
+      setStick({ xNorm: 0, yNorm: 0 });
+      postManualControl({ x: 0, y: 0, z: 500, r: 0, buttons: 0 }).catch(() => {});
+      return;
+    }
+
+    let cancelled = false;
+    const sendTick = async () => {
+      if (cancelled || sendingRef.current) return;
+      sendingRef.current = true;
+      try {
+        await postManualControl({ x: stickX, y: stickY, z: 500, r: 0, buttons: 0 });
+      } catch (e) {
+        if (!cancelled) {
+          setError(String(e.message || e));
+        }
+      } finally {
+        sendingRef.current = false;
+      }
+    };
+
+    sendTick();
+    const timerId = window.setInterval(sendTick, 150);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timerId);
+    };
+  }, [webControlEnabled, stickX, stickY]);
 
   return (
     <main className="page">
@@ -217,16 +320,24 @@ export default function App() {
 
         <div className="card">
           <h2>Manual Control</h2>
-          <label>
-            Throttle (Y): {throttle}
-            <input type="range" min="-1000" max="1000" value={throttle} onChange={(e) => setThrottle(Number(e.target.value))} />
-          </label>
-          <label>
-            Steering (X): {steer}
-            <input type="range" min="-1000" max="1000" value={steer} onChange={(e) => setSteer(Number(e.target.value))} />
-          </label>
+          <button
+            type="button"
+            className={`control-toggle${webControlEnabled ? " active" : ""}`}
+            onClick={() => setWebControlEnabled((prev) => !prev)}
+          >
+            {webControlEnabled ? "Web Control: ENABLED" : "Web Control: DISABLED"}
+          </button>
+          <div className="joystick-wrap">
+            <JoystickPad
+              disabled={!webControlEnabled}
+              xNorm={stick.xNorm}
+              yNorm={stick.yNorm}
+              onChange={setStick}
+              onRelease={() => setStick({ xNorm: 0, yNorm: 0 })}
+            />
+            <p className="meta">Joystick X/Y: {stickX} / {stickY}</p>
+          </div>
           <div className="actions">
-            <button onClick={sendCurrent}>Send</button>
             <button onClick={() => quickCommand(0, 400)}>Forward</button>
             <button onClick={() => quickCommand(0, -400)}>Reverse</button>
             <button onClick={() => quickCommand(-400, 0)}>Left</button>

@@ -94,6 +94,20 @@ input[type="range"] {
   background: #0284c7;
 }
 
+.control-toggle {
+  width: 100%;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.control-toggle.active {
+  background: #dc2626;
+}
+
+.control-toggle.active:hover {
+  background: #b91c1c;
+}
+
 button {
   border: 0;
   border-radius: 8px;
@@ -111,6 +125,53 @@ button:hover {
   margin-top: 8px;
   color: #b91c1c;
   font-weight: 600;
+}
+
+.joystick-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.joystick-pad {
+  position: relative;
+  width: 170px;
+  height: 170px;
+  border-radius: 50%;
+  border: 1px solid #94a3b8;
+  background: radial-gradient(circle at center, #e2e8f0 0%, #cbd5e1 100%);
+  touch-action: none;
+  user-select: none;
+}
+
+.joystick-pad.disabled {
+  opacity: 0.5;
+}
+
+.joystick-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 116px;
+  height: 116px;
+  transform: translate(-50%, -50%);
+  border: 1px dashed #64748b;
+  border-radius: 50%;
+}
+
+.joystick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #0284c7;
+  border: 3px solid #ffffff;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.3);
+  transform: translate(-50%, -50%);
 }
 
 .map {
