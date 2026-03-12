@@ -1,0 +1,8 @@
+flowchart TD
+  A[No video] --> B{cam in /api/streams?}
+  B -- No --> C[Fix go2rtc config and restart]
+  B -- Yes --> D{ffprobe upstream /stream OK?}
+  D -- No --> E[iPhone RTSP not running or wrong IP/path]
+  D -- Yes --> F{ffprobe rtsp://127.0.0.1:8554/cam OK?}
+  F -- No --> G[Check go2rtc logs and restart]
+  F -- Yes --> H[Check WebRTC/iframe/browser restriction]

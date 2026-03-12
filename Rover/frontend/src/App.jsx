@@ -6,7 +6,7 @@ const API_PROTO = window.location.protocol === "https:" ? "https" : "http";
 const WS_PROTO = window.location.protocol === "https:" ? "wss" : "ws";
 const API_BASE = import.meta.env.VITE_API_BASE ?? `${API_PROTO}://${DEFAULT_HOST}:8000`;
 const WS_URL = import.meta.env.VITE_WS_URL ?? `${WS_PROTO}://${DEFAULT_HOST}:8000/ws/telemetry`;
-const VIDEO_WS_STREAM_URL = import.meta.env.VITE_VIDEO_WS_STREAM_URL ?? `${WS_PROTO}://${DEFAULT_HOST}:8000/ws/video/stream`;
+const GO2RTC_WEBRTC_URL = "http://100.121.120.31:1984/webrtc.html?src=cam&media=video";
 const PHONE_CAMERA_PAGE_URL = `${window.location.origin}/phone-camera.html`;
 const DEFAULT_LAT = Number(import.meta.env.VITE_DEFAULT_LAT ?? 35.0);
 const DEFAULT_LON = Number(import.meta.env.VITE_DEFAULT_LON ?? 139.0);
@@ -34,6 +34,11 @@ function fmt(value, digits = 3) {
   return Number(value).toFixed(digits);
 }
 
+async function readError(res, fallback) {
+  const body = await res.json().catch(() => ({}));
+  throw new Error(body.detail ?? fallback);
+}
+
 async function postManualControl(payload) {
   const res = await fetch(`${API_BASE}/api/manual-control`, {
     method: "POST",
@@ -41,9 +46,58 @@ async function postManualControl(payload) {
     body: JSON.stringify(payload)
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail ?? "manual-control failed");
+    await readError(res, "manual-control failed");
   }
+}
+
+async function fetchNetworkStatus() {
+  const res = await fetch(`${API_BASE}/api/network/status`);
+  if (!res.ok) {
+    await readError(res, "network status failed");
+  }
+  return res.json();
+}
+
+async function fetchNetworkScan() {
+  const res = await fetch(`${API_BASE}/api/network/scan`);
+  if (!res.ok) {
+    await readError(res, "network scan failed");
+  }
+  return res.json();
+}
+
+async function putNetworkPolicy(payload) {
+  const res = await fetch(`${API_BASE}/api/network/policy`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    await readError(res, "network policy update failed");
+  }
+  return res.json();
+}
+
+async function postNetworkConnect(payload) {
+  const res = await fetch(`${API_BASE}/api/network/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    await readError(res, "network connect failed");
+  }
+  return res.json();
+}
+
+async function postApplyPriorityPolicy() {
+  const res = await fetch(`${API_BASE}/api/network/apply-priority`, {
+    method: "POST"
+  });
+  if (!res.ok) {
+    await readError(res, "network apply-priority failed");
+  }
+  return res.json();
 }
 
 function hasCoord(lat, lon) {
@@ -146,15 +200,21 @@ export default function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [status, setStatus] = useState("connecting");
   const [apiStatus, setApiStatus] = useState("idle");
-  const [videoStatus, setVideoStatus] = useState("connecting");
-  const [videoUrl, setVideoUrl] = useState("");
   const [error, setError] = useState("");
   const [followMap, setFollowMap] = useState(true);
   const [baseMap, setBaseMap] = useState("satellite");
   const [webControlEnabled, setWebControlEnabled] = useState(false);
   const [stick, setStick] = useState({ xNorm: 0, yNorm: 0 });
+  const [networkStatus, setNetworkStatus] = useState(null);
+  const [networkList, setNetworkList] = useState([]);
+  const [networkBusy, setNetworkBusy] = useState(false);
+  const [networkMessage, setNetworkMessage] = useState("");
+  const [networkError, setNetworkError] = useState("");
+  const [wifiSsid, setWifiSsid] = useState("");
+  const [wifiPassword, setWifiPassword] = useState("");
+  const [tetheringSsid, setTetheringSsid] = useState("");
+  const [tetheringPassword, setTetheringPassword] = useState("");
   const sendingRef = useRef(false);
-  const videoObjectUrlRef = useRef("");
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -211,39 +271,139 @@ export default function App() {
     };
   }, []);
 
+  const syncPolicyInputs = (policy) => {
+    setWifiSsid((prev) => prev || (policy?.wifi_ssid ?? ""));
+    setTetheringSsid((prev) => prev || (policy?.tethering_ssid ?? ""));
+  };
+
+  const refreshNetworkStatus = async () => {
+    const data = await fetchNetworkStatus();
+    setNetworkStatus(data);
+    setNetworkList(Array.isArray(data?.visible_networks) ? data.visible_networks : []);
+    syncPolicyInputs(data?.policy);
+    return data;
+  };
+
+  const refreshNetworkScan = async () => {
+    const scan = await fetchNetworkScan();
+    setNetworkList(Array.isArray(scan?.networks) ? scan.networks : []);
+    return scan;
+  };
+
   useEffect(() => {
-    const ws = new WebSocket(VIDEO_WS_STREAM_URL);
-    ws.binaryType = "blob";
+    let stopped = false;
+    let timerId;
 
-    ws.onopen = () => setVideoStatus("connected");
-    ws.onmessage = (event) => {
-      const blob = event.data instanceof Blob ? event.data : new Blob([event.data], { type: "image/jpeg" });
-      const nextUrl = URL.createObjectURL(blob);
-      if (videoObjectUrlRef.current) {
-        URL.revokeObjectURL(videoObjectUrlRef.current);
+    const poll = async () => {
+      try {
+        await refreshNetworkStatus();
+      } catch (e) {
+        if (!stopped) {
+          setNetworkError(`Network status failed: ${String(e.message || e)}`);
+        }
+      } finally {
+        if (!stopped) {
+          timerId = window.setTimeout(poll, 8000);
+        }
       }
-      videoObjectUrlRef.current = nextUrl;
-      setVideoUrl(nextUrl);
     };
-    ws.onerror = () => setVideoStatus("error");
-    ws.onclose = () => setVideoStatus("closed");
 
-    const pingId = window.setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send("ping");
-      }
-    }, 10000);
-
+    poll();
     return () => {
-      window.clearInterval(pingId);
-      ws.close();
-      if (videoObjectUrlRef.current) {
-        URL.revokeObjectURL(videoObjectUrlRef.current);
-        videoObjectUrlRef.current = "";
+      stopped = true;
+      if (timerId) {
+        window.clearTimeout(timerId);
       }
-      setVideoUrl("");
     };
   }, []);
+
+  const handleSavePolicy = async () => {
+    if (!wifiSsid.trim() || !tetheringSsid.trim()) {
+      setNetworkError("Wi-Fi SSID と テザリング SSID を両方入力してください");
+      return;
+    }
+    setNetworkBusy(true);
+    setNetworkError("");
+    setNetworkMessage("");
+    try {
+      await putNetworkPolicy({
+        wifi_ssid: wifiSsid.trim(),
+        tethering_ssid: tetheringSsid.trim()
+      });
+      await refreshNetworkStatus();
+      setNetworkMessage("優先設定を保存しました（Wi-Fi優先 / テザリングフォールバック）");
+    } catch (e) {
+      setNetworkError(String(e.message || e));
+    } finally {
+      setNetworkBusy(false);
+    }
+  };
+
+  const handleConnectRole = async (role) => {
+    const isWifi = role === "wifi";
+    const ssid = isWifi ? wifiSsid.trim() : tetheringSsid.trim();
+    const password = isWifi ? wifiPassword : tetheringPassword;
+    if (!ssid) {
+      setNetworkError(`${isWifi ? "Wi-Fi" : "テザリング"} SSID を入力してください`);
+      return;
+    }
+
+    setNetworkBusy(true);
+    setNetworkError("");
+    setNetworkMessage("");
+    try {
+      const result = await postNetworkConnect({
+        role,
+        ssid,
+        password,
+        persist_to_policy: true
+      });
+      await refreshNetworkStatus();
+      if (isWifi) {
+        setWifiPassword("");
+      } else {
+        setTetheringPassword("");
+      }
+      setNetworkMessage(`${isWifi ? "Wi-Fi" : "テザリング"} 接続成功: ${result.active?.ssid ?? ssid}`);
+    } catch (e) {
+      setNetworkError(String(e.message || e));
+    } finally {
+      setNetworkBusy(false);
+    }
+  };
+
+  const handleApplyPriority = async () => {
+    setNetworkBusy(true);
+    setNetworkError("");
+    setNetworkMessage("");
+    try {
+      const result = await postApplyPriorityPolicy();
+      await refreshNetworkStatus();
+      setNetworkMessage(
+        result?.ok
+          ? `優先ポリシー適用: ${result.target_ssid ?? result.active?.ssid ?? "-"}`
+          : `優先ポリシー待機: ${result.message ?? "configured SSID not visible"}`
+      );
+    } catch (e) {
+      setNetworkError(String(e.message || e));
+    } finally {
+      setNetworkBusy(false);
+    }
+  };
+
+  const handleScan = async () => {
+    setNetworkBusy(true);
+    setNetworkError("");
+    setNetworkMessage("");
+    try {
+      await refreshNetworkScan();
+      setNetworkMessage("周辺ネットワークを更新しました");
+    } catch (e) {
+      setNetworkError(String(e.message || e));
+    } finally {
+      setNetworkBusy(false);
+    }
+  };
 
   const lat = telemetry?.position?.lat_deg;
   const lon = telemetry?.position?.lon_deg;
@@ -359,15 +519,105 @@ export default function App() {
 
         <div className="card">
           <h2>Camera</h2>
-          <p className="meta">Video WS: {videoStatus}</p>
-          {videoUrl ? (
-            <img className="camera-frame" src={videoUrl} alt="Phone camera stream" />
-          ) : (
-            <div className="camera-placeholder">No stream. Open phone camera publisher and press Start.</div>
-          )}
+          <p className="meta">go2rtc WebRTC</p>
+          <iframe
+            className="camera-frame camera-iframe"
+            src={GO2RTC_WEBRTC_URL}
+            title="go2rtc camera stream"
+            allow="autoplay; fullscreen; picture-in-picture; microphone; camera"
+          />
+          <a className="camera-link" href={GO2RTC_WEBRTC_URL} target="_blank" rel="noreferrer">
+            {GO2RTC_WEBRTC_URL}
+          </a>
           <a className="camera-link" href={PHONE_CAMERA_PAGE_URL} target="_blank" rel="noreferrer">
             {PHONE_CAMERA_PAGE_URL}
           </a>
+        </div>
+
+        <div className="card">
+          <h2>Network Priority (Pi)</h2>
+          <p className="meta">nmcli: {networkStatus?.nmcli_available ? "available" : "unavailable"}</p>
+          <p className="meta">Interface: {networkStatus?.interface ?? "-"}</p>
+          <p className="meta">Active SSID: {networkStatus?.active?.ssid ?? "-"}</p>
+          <p className="meta">
+            Last Apply: {networkStatus?.last_apply?.status ?? "-"}
+            {networkStatus?.last_apply?.message ? ` (${networkStatus.last_apply.message})` : ""}
+          </p>
+
+          <div className="network-grid">
+            <label>
+              Wi-Fi (優先) SSID
+              <input
+                type="text"
+                value={wifiSsid}
+                onChange={(event) => setWifiSsid(event.target.value)}
+                placeholder="home-wifi"
+              />
+            </label>
+            <label>
+              Wi-Fi Password
+              <input
+                type="password"
+                value={wifiPassword}
+                onChange={(event) => setWifiPassword(event.target.value)}
+                placeholder="********"
+              />
+            </label>
+            <label>
+              テザリング SSID
+              <input
+                type="text"
+                value={tetheringSsid}
+                onChange={(event) => setTetheringSsid(event.target.value)}
+                placeholder="iphone-hotspot"
+              />
+            </label>
+            <label>
+              テザリング Password
+              <input
+                type="password"
+                value={tetheringPassword}
+                onChange={(event) => setTetheringPassword(event.target.value)}
+                placeholder="********"
+              />
+            </label>
+          </div>
+
+          <div className="network-actions">
+            <button type="button" disabled={networkBusy} onClick={handleSavePolicy}>
+              優先設定を保存
+            </button>
+            <button type="button" disabled={networkBusy} onClick={() => handleConnectRole("wifi")}>
+              Wi-Fi接続テスト
+            </button>
+            <button type="button" disabled={networkBusy} onClick={() => handleConnectRole("tethering")}>
+              テザリング接続テスト
+            </button>
+            <button type="button" disabled={networkBusy} onClick={handleApplyPriority}>
+              優先ポリシー適用
+            </button>
+            <button type="button" disabled={networkBusy} onClick={handleScan}>
+              周辺ネットワーク再検索
+            </button>
+          </div>
+
+          <div className="network-scan-list">
+            {networkList.slice(0, 8).map((net) => (
+              <div key={net.ssid} className="network-scan-row">
+                <div>
+                  <strong>{net.ssid}</strong>
+                  <span className="meta"> ({net.signal ?? "-"}%) {net.security || "open"}</span>
+                </div>
+                <div className="network-scan-buttons">
+                  <button type="button" onClick={() => setWifiSsid(net.ssid)}>Wi-Fiに設定</button>
+                  <button type="button" onClick={() => setTetheringSsid(net.ssid)}>テザに設定</button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {networkMessage ? <p className="meta">{networkMessage}</p> : null}
+          {networkError ? <p className="error">{networkError}</p> : null}
         </div>
 
         <div className="card">

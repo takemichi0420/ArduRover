@@ -1,0 +1,6 @@
+flowchart LR
+  Boot[Pi boot] --> B[systemd: rover-backend]
+  Boot --> F[systemd: rover-frontend]
+  B --> H[/api/health]
+  B --> N[/api/network/status]
+  F --> UI[Web GCS :5173]

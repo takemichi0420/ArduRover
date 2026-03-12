@@ -1,0 +1,12 @@
+sequenceDiagram
+  participant P as PC
+  participant R as Raspberry Pi
+  participant I as iPhone
+  P->>I: Tailscale ON + RTSP Server Start
+  P->>R: SSH / tailscale status
+  P->>R: ffprobe rtsp://<iphone_ip>:8554/stream
+  P->>R: go2rtc.yaml update + docker restart go2rtc
+  P->>R: ffprobe rtsp://127.0.0.1:8554/cam
+  P->>R: systemctl restart rover-backend/front
+  P->>R: curl /api/health, /api/network/status
+  P->>R: Web GCS check

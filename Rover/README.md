@@ -32,6 +32,15 @@ source rvenv/bin/activate
 MAVLINK_CONNECTION="udpin:127.0.0.1:14551" uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Pi上でネットワーク優先制御も使う場合:
+
+```bash
+WIFI_INTERFACE="wlan0" \
+NETWORK_POLICY_PATH="$HOME/.config/rover-gcs/network_policy.json" \
+NETWORK_POLICY_INTERVAL_SEC="20" \
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
 ポートを変更したい場合は環境変数で指定できます。
 
 ```bash
@@ -85,6 +94,36 @@ npm run dev
 - `GET /api/telemetry`: 現在のスナップショット
 - `POST /api/manual-control`: `MANUAL_CONTROL` 送信
 - `WS /ws/telemetry`: 5Hz でテレメトリ配信
+- `WS /ws/video/publish`: スマホからJPEGフレームを受信
+- `WS /ws/video/stream`: GCSへ映像フレームを配信
+- `GET /api/network/status`: Pi の接続状態、優先ポリシー、可視SSID
+- `GET /api/network/scan`: 可視SSIDの再スキャン
+- `PUT /api/network/policy`: 優先Wi-Fi SSID / テザリング SSID を保存
+- `POST /api/network/connect`: SSID + パスワードで接続テスト（成功時は保存）
+- `POST /api/network/apply-priority`: Wi-Fi優先フォールバックを即時適用
+
+## 4. スマホカメラ映像を表示
+
+1. GCSを開いたPCで backend / frontend を起動
+2. スマホで `http://<frontend-host>:5173/phone-camera.html` を開く
+3. `Start` を押す（カメラ許可が必要）
+4. GCS画面の `Camera` パネルに映像が表示される
+
+同一LANで使う場合は、スマホから backend の `8000` ポートへ到達できる必要があります。
+
+## 5. Pi ネットワーク優先制御（Wi-Fi優先 / テザリングフォールバック）
+
+1. Web GCS の `Network Priority (Pi)` カードを開く
+2. `Wi-Fi (優先) SSID` と `テザリング SSID` を入力
+3. 必要ならパスワードを入力して `接続テスト` を実行
+4. `優先設定を保存` を実行
+5. `優先ポリシー適用` を実行
+
+仕様:
+
+- Wi-Fi SSID が見える場合は Wi-Fi を優先
+- Wi-Fi が見えない場合は テザリング SSID にフォールバック
+- バックエンドは定期的に優先ポリシーを再評価（既定20秒）
 
 ## 注意
 

@@ -65,6 +65,16 @@ input[type="range"] {
   width: 100%;
 }
 
+input[type="text"],
+input[type="password"] {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid #94a3b8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
 .actions {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -128,12 +138,17 @@ button:hover {
 }
 
 .camera-frame {
+  display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
   object-fit: cover;
   border: 1px solid #94a3b8;
   border-radius: 10px;
   background: #0f172a;
+}
+
+.camera-iframe {
+  border: 1px solid #94a3b8;
 }
 
 .camera-placeholder {
@@ -157,6 +172,40 @@ button:hover {
   font-size: 0.8rem;
   color: #0369a1;
   word-break: break-all;
+}
+
+.network-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.network-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.network-scan-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.network-scan-row {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+}
+
+.network-scan-buttons {
+  margin-top: 6px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .joystick-wrap {
@@ -215,6 +264,11 @@ button:hover {
 
 @media (max-width: 960px) {
   .page {
+    grid-template-columns: 1fr;
+  }
+
+  .network-actions,
+  .network-scan-buttons {
     grid-template-columns: 1fr;
   }
 

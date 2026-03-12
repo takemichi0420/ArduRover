@@ -1,0 +1,12 @@
+flowchart LR
+  iPhone[iPhone<br/>RTSP Server /stream:8554]
+  TS[Tailscale Tailnet]
+  Pi[Raspberry Pi<br/>go2rtc + backend + frontend]
+  PC[PC/Web GCS]
+  iPhone --> TS
+  Pi --> TS
+  PC --> TS
+  iPhone -->|RTSP| Pi
+  Pi -->|WebRTC/RTSP| PC
+  Pi -->|API :8000| PC
+  Pi -->|Frontend :5173| PC

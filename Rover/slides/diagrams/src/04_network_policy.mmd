@@ -1,0 +1,8 @@
+stateDiagram-v2
+  [*] --> Check
+  Check --> Wifi: Wi-Fi SSID visible
+  Check --> Tether: Wi-Fi not visible and tethering visible
+  Check --> Wait: neither visible
+  Wifi --> Check
+  Tether --> Check
+  Wait --> Check

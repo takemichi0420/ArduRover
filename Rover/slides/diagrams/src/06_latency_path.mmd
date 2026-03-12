@@ -1,0 +1,8 @@
+flowchart LR
+  I[iPhone camera] --> A[RTSP Server app]
+  A --> T[Tailscale path]
+  T --> G[Pi go2rtc]
+  G --> W[WebRTC to browser]
+  W --> U[Web GCS iframe]
+  T -. relay route .-> R[Higher latency]
+  T -. direct route .-> D[Lower latency]
