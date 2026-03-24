@@ -18,22 +18,49 @@ from pymavlink import mavutil
 
 logger = logging.getLogger(__name__)
 
+RC_PWM_MIN = 1000
+RC_PWM_MAX = 2000
+RC_CHANNEL_IGNORE = 65535
+DEFAULT_RC_STEER_CHANNEL = 1
+DEFAULT_RC_THROTTLE_CHANNEL = 3
+
+
+def _clamp_channel_number(channel: int) -> int:
+    return max(1, min(8, channel))
+
+
+def _env_channel_number(name: str) -> Optional[int]:
+    raw = os.getenv(name)
+    try:
+        channel = int(raw) if raw is not None else None
+    except ValueError:
+        channel = None
+    if channel is None:
+        return None
+    return _clamp_channel_number(channel)
+
+
+ENV_RC_STEER_CHANNEL = _env_channel_number("RC_OVERRIDE_STEER_CHANNEL")
+ENV_RC_THROTTLE_CHANNEL = _env_channel_number("RC_OVERRIDE_THROTTLE_CHANNEL")
+
 
 class ManualControlRequest(BaseModel):
     x: int = Field(0, ge=-1000, le=1000)
     y: int = Field(0, ge=-1000, le=1000)
-    z: int = Field(500, ge=0, le=1000)
+    z: int = Field(0, ge=-1000, le=1000)
     r: int = Field(0, ge=-1000, le=1000)
     buttons: int = 0
 
 
 class NetworkPolicyRequest(BaseModel):
-    wifi_ssid: str = Field(..., min_length=1, max_length=64)
-    tethering_ssid: str = Field(..., min_length=1, max_length=64)
+    primary_ssid: str = Field("", max_length=64)
+    secondary_ssid: str = Field("", max_length=64)
+    wifi_ssid: str = Field("", max_length=64)
+    tethering_ssid: str = Field("", max_length=64)
 
 
 class NetworkConnectRequest(BaseModel):
-    role: Literal["wifi", "tethering"]
+    role: Literal["primary", "secondary", "wifi", "tethering"]
     ssid: str = Field(..., min_length=1, max_length=64)
     password: str = Field("", max_length=128)
     persist_to_policy: bool = True
@@ -62,6 +89,8 @@ class NetworkManagerService:
 
     def _default_policy(self) -> Dict[str, Any]:
         return {
+            "primary_ssid": "",
+            "secondary_ssid": "",
             "wifi_ssid": "",
             "tethering_ssid": "",
             "updated_at": None,
@@ -86,8 +115,12 @@ class NetworkManagerService:
 
         policy = self._default_policy()
         if isinstance(parsed, dict):
-            policy["wifi_ssid"] = str(parsed.get("wifi_ssid") or "").strip()
-            policy["tethering_ssid"] = str(parsed.get("tethering_ssid") or "").strip()
+            primary_ssid = str(parsed.get("primary_ssid") or parsed.get("wifi_ssid") or "").strip()
+            secondary_ssid = str(parsed.get("secondary_ssid") or parsed.get("tethering_ssid") or "").strip()
+            policy["primary_ssid"] = primary_ssid
+            policy["secondary_ssid"] = secondary_ssid
+            policy["wifi_ssid"] = primary_ssid
+            policy["tethering_ssid"] = secondary_ssid
             policy["updated_at"] = parsed.get("updated_at")
         return policy
 
@@ -101,11 +134,15 @@ class NetworkManagerService:
         with self._lock:
             return dict(self._load_policy_unlocked())
 
-    def set_policy(self, wifi_ssid: str, tethering_ssid: str) -> Dict[str, Any]:
+    def set_policy(self, primary_ssid: str, secondary_ssid: str) -> Dict[str, Any]:
         with self._lock:
             policy = self._load_policy_unlocked()
-            policy["wifi_ssid"] = wifi_ssid.strip()
-            policy["tethering_ssid"] = tethering_ssid.strip()
+            normalized_primary = primary_ssid.strip()
+            normalized_secondary = secondary_ssid.strip()
+            policy["primary_ssid"] = normalized_primary
+            policy["secondary_ssid"] = normalized_secondary
+            policy["wifi_ssid"] = normalized_primary
+            policy["tethering_ssid"] = normalized_secondary
             policy["updated_at"] = time.time()
             self._save_policy_unlocked(policy)
         self._apply_autoconnect_priority(policy)
@@ -331,14 +368,18 @@ class NetworkManagerService:
             )
 
     def _apply_autoconnect_priority(self, policy: Dict[str, Any]) -> None:
-        wifi_ssid = str(policy.get("wifi_ssid") or "").strip()
-        tether_ssid = str(policy.get("tethering_ssid") or "").strip()
-        self._set_connection_priority(wifi_ssid, 100)
-        self._set_connection_priority(tether_ssid, 50)
+        primary_ssid = str(policy.get("primary_ssid") or policy.get("wifi_ssid") or "").strip()
+        secondary_ssid = str(policy.get("secondary_ssid") or policy.get("tethering_ssid") or "").strip()
+        self._set_connection_priority(primary_ssid, 100)
+        self._set_connection_priority(secondary_ssid, 50)
+
+    @staticmethod
+    def _role_to_policy_key(role: str) -> str:
+        return "primary_ssid" if role in {"primary", "wifi"} else "secondary_ssid"
 
     def connect(
         self,
-        role: Literal["wifi", "tethering"],
+        role: Literal["primary", "secondary", "wifi", "tethering"],
         ssid: str,
         password: str,
         persist_to_policy: bool = True,
@@ -352,8 +393,10 @@ class NetworkManagerService:
         if persist_to_policy:
             with self._lock:
                 policy = self._load_policy_unlocked()
-                key = "wifi_ssid" if role == "wifi" else "tethering_ssid"
+                key = self._role_to_policy_key(role)
                 policy[key] = target_ssid
+                policy["wifi_ssid"] = str(policy.get("primary_ssid") or "").strip()
+                policy["tethering_ssid"] = str(policy.get("secondary_ssid") or "").strip()
                 policy["updated_at"] = time.time()
                 self._save_policy_unlocked(policy)
             self._apply_autoconnect_priority(policy)
@@ -369,28 +412,37 @@ class NetworkManagerService:
 
     def apply_priority_policy(self) -> Dict[str, Any]:
         policy = self.get_policy()
-        wifi_ssid = str(policy.get("wifi_ssid") or "").strip()
-        tether_ssid = str(policy.get("tethering_ssid") or "").strip()
+        primary_ssid = str(policy.get("primary_ssid") or policy.get("wifi_ssid") or "").strip()
+        secondary_ssid = str(policy.get("secondary_ssid") or policy.get("tethering_ssid") or "").strip()
 
-        if not wifi_ssid and not tether_ssid:
+        if not primary_ssid and not secondary_ssid:
             result = {
                 "ok": False,
                 "status": "missing-policy",
-                "message": "set wifi/tethering SSID first",
+                "message": "set primary/secondary SSID first",
                 "policy": policy,
             }
             self._set_last_apply(result["status"], result["message"], None)
             return result
 
-        visible = {entry["ssid"] for entry in self.scan_wifi(rescan=False)}
-        target_role: Optional[Literal["wifi", "tethering"]] = None
+        active = self.get_active_connection()
+        visible_networks = self.scan_wifi(rescan=False)
+        visible = {entry["ssid"] for entry in visible_networks}
+
+        # If we're currently not on the primary link, force a fresh scan so the
+        # device can jump back to the preferred SSID as soon as it becomes visible.
+        if primary_ssid and active.get("ssid") != primary_ssid and primary_ssid not in visible:
+            visible_networks = self.scan_wifi(rescan=True)
+            visible = {entry["ssid"] for entry in visible_networks}
+
+        target_role: Optional[Literal["primary", "secondary"]] = None
         target_ssid = ""
-        if wifi_ssid and wifi_ssid in visible:
-            target_role = "wifi"
-            target_ssid = wifi_ssid
-        elif tether_ssid and tether_ssid in visible:
-            target_role = "tethering"
-            target_ssid = tether_ssid
+        if primary_ssid and primary_ssid in visible:
+            target_role = "primary"
+            target_ssid = primary_ssid
+        elif secondary_ssid and secondary_ssid in visible:
+            target_role = "secondary"
+            target_ssid = secondary_ssid
         else:
             result = {
                 "ok": False,
@@ -402,7 +454,6 @@ class NetworkManagerService:
             self._set_last_apply(result["status"], result["message"], None)
             return result
 
-        active = self.get_active_connection()
         if active.get("ssid") == target_ssid:
             result = {
                 "ok": True,
@@ -479,6 +530,10 @@ class MavlinkService:
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._stream_requested = False
+        self.steer_channel_number = ENV_RC_STEER_CHANNEL or DEFAULT_RC_STEER_CHANNEL
+        self.throttle_channel_number = ENV_RC_THROTTLE_CHANNEL or DEFAULT_RC_THROTTLE_CHANNEL
+        self.steer_channel_source = "env" if ENV_RC_STEER_CHANNEL is not None else "default"
+        self.throttle_channel_source = "env" if ENV_RC_THROTTLE_CHANNEL is not None else "default"
 
     def start(self) -> None:
         try:
@@ -517,6 +572,7 @@ class MavlinkService:
                 with self._lock:
                     self.connected = True
                     self.last_seen_at = time.time()
+                self._resolve_rc_override_channels()
                 self._request_streams()
                 continue
 
@@ -565,6 +621,56 @@ class MavlinkService:
 
         self._stream_requested = True
 
+    def _resolve_rc_override_channels(self) -> None:
+        steer_channel = self.steer_channel_number
+        throttle_channel = self.throttle_channel_number
+        steer_source = self.steer_channel_source
+        throttle_source = self.throttle_channel_source
+
+        if ENV_RC_STEER_CHANNEL is None:
+            param_channel = self._fetch_param_channel_number("RCMAP_ROLL")
+            if param_channel is not None:
+                steer_channel = param_channel
+                steer_source = "param:RCMAP_ROLL"
+
+        if ENV_RC_THROTTLE_CHANNEL is None:
+            param_channel = self._fetch_param_channel_number("RCMAP_THROTTLE")
+            if param_channel is not None:
+                throttle_channel = param_channel
+                throttle_source = "param:RCMAP_THROTTLE"
+
+        with self._lock:
+            self.steer_channel_number = steer_channel
+            self.throttle_channel_number = throttle_channel
+            self.steer_channel_source = steer_source
+            self.throttle_channel_source = throttle_source
+
+    def _fetch_param_channel_number(self, name: str, timeout_sec: float = 1.5) -> Optional[int]:
+        if self.master is None:
+            return None
+
+        with suppress(Exception):
+            self.master.param_fetch_one(name)
+
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline and not self._stop_event.is_set():
+            msg = self.master.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.2)
+            if msg is None:
+                continue
+            param_id = msg.param_id
+            if isinstance(param_id, bytes):
+                param_name = param_id.decode(errors="ignore").rstrip("\x00")
+            else:
+                param_name = str(param_id).rstrip("\x00")
+            if param_name != name:
+                continue
+            try:
+                return _clamp_channel_number(int(round(float(msg.param_value))))
+            except (TypeError, ValueError):
+                return None
+
+        return None
+
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             pos = self.latest.get("GLOBAL_POSITION_INT", {})
@@ -586,6 +692,12 @@ class MavlinkService:
                 "last_seen_at": self.last_seen_at,
                 "target_system": self.master.target_system if self.master else 0,
                 "target_component": self.master.target_component if self.master else 0,
+                "rc_override": {
+                    "steer_channel": self.steer_channel_number,
+                    "steer_source": self.steer_channel_source,
+                    "throttle_channel": self.throttle_channel_number,
+                    "throttle_source": self.throttle_channel_source,
+                },
                 "position": {
                     "lat_deg": lat / 1e7 if lat is not None else None,
                     "lon_deg": lon / 1e7 if lon is not None else None,
@@ -627,15 +739,24 @@ class MavlinkService:
             raise RuntimeError("MAVLink connection is not initialized")
         if self.master.target_system == 0:
             raise RuntimeError("Target system is unknown. Wait for heartbeat first")
+        target_component = self.master.target_component or mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1
+        channel_values = [RC_CHANNEL_IGNORE] * 8
+        steer_channel_index = self.steer_channel_number - 1
+        throttle_channel_index = self.throttle_channel_number - 1
+        channel_values[steer_channel_index] = self._manual_value_to_pwm(req.y)
+        channel_values[throttle_channel_index] = self._manual_value_to_pwm(req.z)
 
-        self.master.mav.manual_control_send(
+        self.master.mav.rc_channels_override_send(
             self.master.target_system,
-            req.x,
-            req.y,
-            req.z,
-            req.r,
-            req.buttons,
+            target_component,
+            *channel_values,
         )
+
+    @staticmethod
+    def _manual_value_to_pwm(value: int) -> int:
+        value = max(-1000, min(1000, int(value)))
+        span = RC_PWM_MAX - RC_PWM_MIN
+        return int(round(RC_PWM_MIN + span * ((value + 1000) / 2000.0)))
 
 
 class VideoHub:
@@ -765,6 +886,12 @@ async def health() -> Dict[str, Any]:
         "mav_start_error": mav.start_error,
         "target_system": mav.master.target_system if mav.master else None,
         "target_component": mav.master.target_component if mav.master else None,
+        "rc_override": {
+            "steer_channel": mav.steer_channel_number,
+            "steer_source": mav.steer_channel_source,
+            "throttle_channel": mav.throttle_channel_number,
+            "throttle_source": mav.throttle_channel_source,
+        },
     }
 
 
@@ -804,10 +931,12 @@ async def network_policy_get() -> Dict[str, Any]:
 @app.put("/api/network/policy")
 async def network_policy_update(req: NetworkPolicyRequest) -> Dict[str, Any]:
     try:
+        primary_ssid = str(req.primary_ssid or req.wifi_ssid or "").strip()
+        secondary_ssid = str(req.secondary_ssid or req.tethering_ssid or "").strip()
         policy = await asyncio.to_thread(
             network_manager.set_policy,
-            req.wifi_ssid,
-            req.tethering_ssid,
+            primary_ssid,
+            secondary_ssid,
         )
         return {"ok": True, "policy": policy}
     except Exception as exc:

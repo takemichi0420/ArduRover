@@ -1,0 +1,20 @@
+[Unit]
+Description=Rover GCS Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/GitHub/workshop/Rover/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=MAVLINK_CONNECTION=udpin:127.0.0.1:14551
+Environment=WIFI_INTERFACE=wlan0
+Environment=NETWORK_POLICY_PATH=/home/pi/.config/rover-gcs/network_policy.json
+Environment=NETWORK_POLICY_INTERVAL_SEC=20
+ExecStart=/home/pi/GitHub/workshop/Rover/backend/rvenv/bin/python -m uvicorn app.main:app --app-dir /home/pi/GitHub/workshop/Rover/backend --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
