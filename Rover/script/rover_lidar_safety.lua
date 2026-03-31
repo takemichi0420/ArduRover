@@ -55,7 +55,7 @@ assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 9), "RSTOP: add tabl
 assert(param:add_table(EXTRA_PARAM_TABLE_KEY, EXTRA_PARAM_TABLE_PREFIX, 1), "RSTOP: add extra table failed")
 
 local RSTOP_ENABLE = bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "ENABLE", 1, 1)
-local RSTOP_DIST_M = bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "DIST_M", 2, 1.5)
+local RSTOP_DIST_M = bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "DIST_M", 2, 1.0)
 local RSTOP_TOUT_MS = bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "TOUT_MS", 3, 500)
 local RSTOP_INST = bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "INST", 4, 1)
 local RSTOP_MODE = bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "MODE", 5, 4)
@@ -108,7 +108,7 @@ local function grace_ms()
 end
 
 local function threshold_distance_m()
-    local dist = RSTOP_DIST_M:get() or 1.5
+    local dist = RSTOP_DIST_M:get() or 1.0
     if dist < 0.05 then
         return 0.05
     end

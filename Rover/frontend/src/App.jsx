@@ -29,6 +29,9 @@ const BASE_MAPS = {
   }
 };
 const LOW_BATTERY_THRESHOLD_PCT = 30;
+const LIDAR_STOP_DISTANCE_STEP_M = 0.1;
+const LIDAR_STOP_DISTANCE_MIN_M = 0.1;
+const LIDAR_STOP_DISTANCE_MAX_M = 30.0;
 
 function fmt(value, digits = 3) {
   if (value === null || value === undefined) return "-";
@@ -101,12 +104,36 @@ async function postApplyPriorityPolicy() {
   return res.json();
 }
 
+async function fetchLidarStopDistance() {
+  const res = await fetch(`${API_BASE}/api/safety/lidar-stop-distance`);
+  if (!res.ok) {
+    await readError(res, "lidar stop distance fetch failed");
+  }
+  return res.json();
+}
+
+async function putLidarStopDistance(payload) {
+  const res = await fetch(`${API_BASE}/api/safety/lidar-stop-distance`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    await readError(res, "lidar stop distance update failed");
+  }
+  return res.json();
+}
+
 function hasCoord(lat, lon) {
   return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
 }
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function roundLidarStopDistance(value) {
+  return Math.round(value * 10) / 10;
 }
 
 function MapAutoCenter({ center, enabled }) {
@@ -215,6 +242,11 @@ export default function App() {
   const [primaryPassword, setPrimaryPassword] = useState("");
   const [secondarySsid, setSecondarySsid] = useState("");
   const [secondaryPassword, setSecondaryPassword] = useState("");
+  const [lidarStopDistanceM, setLidarStopDistanceM] = useState(null);
+  const [lidarStopDistanceDraft, setLidarStopDistanceDraft] = useState("1.0");
+  const [lidarSafetyBusy, setLidarSafetyBusy] = useState(false);
+  const [lidarSafetyMessage, setLidarSafetyMessage] = useState("");
+  const [lidarSafetyError, setLidarSafetyError] = useState("");
   const sendingRef = useRef(false);
 
   useEffect(() => {
@@ -328,6 +360,24 @@ export default function App() {
     };
   }, []);
 
+  const refreshLidarStopDistance = async () => {
+    const data = await fetchLidarStopDistance();
+    const distance = Number(data?.distance_m);
+    if (Number.isFinite(distance)) {
+      const normalized = roundLidarStopDistance(distance);
+      setLidarStopDistanceM(normalized);
+      setLidarStopDistanceDraft(normalized.toFixed(1));
+    }
+    setLidarSafetyError("");
+    return data;
+  };
+
+  useEffect(() => {
+    refreshLidarStopDistance().catch((e) => {
+      setLidarSafetyError(`LiDAR停止距離の取得に失敗: ${String(e.message || e)}`);
+    });
+  }, []);
+
   const handleSavePolicy = async () => {
     if (!primarySsid.trim() && !secondarySsid.trim()) {
       setNetworkError("第1候補または第2候補の SSID を少なくとも1つ入力してください");
@@ -413,6 +463,52 @@ export default function App() {
       setNetworkError(String(e.message || e));
     } finally {
       setNetworkBusy(false);
+    }
+  };
+
+  const adjustLidarStopDistance = (deltaM) => {
+    const base = Number.parseFloat(lidarStopDistanceDraft);
+    const currentBase = Number.isFinite(base)
+      ? base
+      : (Number.isFinite(lidarStopDistanceM) ? lidarStopDistanceM : 1.0);
+    const next = clamp(
+      roundLidarStopDistance(currentBase + deltaM),
+      LIDAR_STOP_DISTANCE_MIN_M,
+      LIDAR_STOP_DISTANCE_MAX_M
+    );
+    setLidarStopDistanceDraft(next.toFixed(1));
+    setLidarSafetyError("");
+    setLidarSafetyMessage("");
+  };
+
+  const handleSaveLidarStopDistance = async () => {
+    const parsed = Number.parseFloat(lidarStopDistanceDraft);
+    if (!Number.isFinite(parsed)) {
+      setLidarSafetyError("停止距離を数値で入力してください");
+      return;
+    }
+
+    const normalized = clamp(
+      roundLidarStopDistance(parsed),
+      LIDAR_STOP_DISTANCE_MIN_M,
+      LIDAR_STOP_DISTANCE_MAX_M
+    );
+
+    setLidarSafetyBusy(true);
+    setLidarSafetyError("");
+    setLidarSafetyMessage("");
+    try {
+      const result = await putLidarStopDistance({ distance_m: normalized });
+      const applied = Number(result?.distance_m);
+      if (Number.isFinite(applied)) {
+        setLidarStopDistanceM(applied);
+        setLidarStopDistanceDraft(applied.toFixed(1));
+      }
+      setLidarSafetyMessage(`停止距離を ${normalized.toFixed(1)} m に更新しました`);
+    } catch (e) {
+      setLidarSafetyError(String(e.message || e));
+    } finally {
+      setLidarSafetyBusy(false);
     }
   };
 
@@ -599,6 +695,61 @@ export default function App() {
             <p>GPS Fix: {telemetry?.gps?.fix_type ?? "-"} (Sat {telemetry?.gps?.satellites_visible ?? "-"})</p>
             <p>Battery: {fmt(telemetry?.battery?.voltage_v, 2)} V ({batteryDisplayText})</p>
             {lowBattery ? <p className="error">Battery 30%以下: 速やかに帰還してください</p> : null}
+          </div>
+
+          <div className="card">
+            <h2>LiDAR Safety</h2>
+            <p className="meta">
+              FC現在値: {Number.isFinite(lidarStopDistanceM) ? `${lidarStopDistanceM.toFixed(1)} m` : "-"}
+            </p>
+            <label>
+              障害物STOP距離 [m]
+              <input
+                type="number"
+                min={LIDAR_STOP_DISTANCE_MIN_M}
+                max={LIDAR_STOP_DISTANCE_MAX_M}
+                step={LIDAR_STOP_DISTANCE_STEP_M}
+                value={lidarStopDistanceDraft}
+                onChange={(event) => {
+                  setLidarStopDistanceDraft(event.target.value);
+                  setLidarSafetyError("");
+                  setLidarSafetyMessage("");
+                }}
+              />
+            </label>
+            <p className="meta">10cm単位で設定します</p>
+            <div className="safety-actions">
+              <button type="button" disabled={lidarSafetyBusy} onClick={() => adjustLidarStopDistance(-0.1)}>
+                -0.1 m
+              </button>
+              <button type="button" disabled={lidarSafetyBusy} onClick={() => adjustLidarStopDistance(0.1)}>
+                +0.1 m
+              </button>
+              <button
+                type="button"
+                disabled={lidarSafetyBusy}
+                onClick={async () => {
+                  setLidarSafetyBusy(true);
+                  setLidarSafetyError("");
+                  setLidarSafetyMessage("");
+                  try {
+                    await refreshLidarStopDistance();
+                    setLidarSafetyMessage("FCの設定値を読み直しました");
+                  } catch (e) {
+                    setLidarSafetyError(String(e.message || e));
+                  } finally {
+                    setLidarSafetyBusy(false);
+                  }
+                }}
+              >
+                読み直し
+              </button>
+              <button type="button" disabled={lidarSafetyBusy} onClick={handleSaveLidarStopDistance}>
+                保存
+              </button>
+            </div>
+            {lidarSafetyMessage ? <p className="meta">{lidarSafetyMessage}</p> : null}
+            {lidarSafetyError ? <p className="error">{lidarSafetyError}</p> : null}
           </div>
 
           <div className="card">

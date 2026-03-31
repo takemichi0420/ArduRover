@@ -23,6 +23,12 @@ RC_PWM_MAX = 2000
 RC_CHANNEL_IGNORE = 65535
 DEFAULT_RC_STEER_CHANNEL = 1
 DEFAULT_RC_THROTTLE_CHANNEL = 3
+LIDAR_STOP_PARAM_NAME = "RSTOP_DIST_M"
+LIDAR_STOP_DISTANCE_DEFAULT_M = 1.0
+LIDAR_STOP_DISTANCE_STEP_M = 0.1
+LIDAR_STOP_DISTANCE_MIN_M = 0.1
+LIDAR_STOP_DISTANCE_MAX_M = 30.0
+LIDAR_STOP_DISTANCE_TOLERANCE_M = 0.051
 
 
 def _clamp_channel_number(channel: int) -> int:
@@ -38,6 +44,15 @@ def _env_channel_number(name: str) -> Optional[int]:
     if channel is None:
         return None
     return _clamp_channel_number(channel)
+
+
+def _round_lidar_stop_distance_m(value: float) -> float:
+    return round(float(value) * 10.0) / 10.0
+
+
+def _is_lidar_stop_distance_step(value: float) -> bool:
+    rounded = _round_lidar_stop_distance_m(value)
+    return math.isclose(float(value), rounded, abs_tol=1.0e-6)
 
 
 ENV_RC_STEER_CHANNEL = _env_channel_number("RC_OVERRIDE_STEER_CHANNEL")
@@ -64,6 +79,14 @@ class NetworkConnectRequest(BaseModel):
     ssid: str = Field(..., min_length=1, max_length=64)
     password: str = Field("", max_length=128)
     persist_to_policy: bool = True
+
+
+class LidarStopDistanceRequest(BaseModel):
+    distance_m: float = Field(
+        ...,
+        ge=LIDAR_STOP_DISTANCE_MIN_M,
+        le=LIDAR_STOP_DISTANCE_MAX_M,
+    )
 
 
 class NetworkManagerService:
@@ -429,8 +452,8 @@ class NetworkManagerService:
         visible_networks = self.scan_wifi(rescan=False)
         visible = {entry["ssid"] for entry in visible_networks}
 
-        # If we're currently not on the primary link, force a fresh scan so the
-        # device can jump back to the preferred SSID as soon as it becomes visible.
+        # 現在の接続先が第1候補でない場合は再スキャンを強制し、
+        # 第1候補 SSID が見えた瞬間に優先接続へ戻せるようにする。
         if primary_ssid and active.get("ssid") != primary_ssid and primary_ssid not in visible:
             visible_networks = self.scan_wifi(rescan=True)
             visible = {entry["ssid"] for entry in visible_networks}
@@ -527,9 +550,11 @@ class MavlinkService:
         self.latest: Dict[str, Dict[str, Any]] = {}
         self.last_seen_at: Optional[float] = None
         self._lock = threading.Lock()
+        self._master_io_lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._stream_requested = False
+        self._lidar_stop_distance_m: Optional[float] = None
         self.steer_channel_number = ENV_RC_STEER_CHANNEL or DEFAULT_RC_STEER_CHANNEL
         self.throttle_channel_number = ENV_RC_THROTTLE_CHANNEL or DEFAULT_RC_THROTTLE_CHANNEL
         self.steer_channel_source = "env" if ENV_RC_STEER_CHANNEL is not None else "default"
@@ -564,7 +589,8 @@ class MavlinkService:
         ]
         while not self._stop_event.is_set() and self.master is not None:
             if not self.connected:
-                heartbeat = self.master.wait_heartbeat(timeout=1)
+                with self._master_io_lock:
+                    heartbeat = self.master.wait_heartbeat(timeout=1)
                 if heartbeat is None:
                     time.sleep(0.1)
                     continue
@@ -576,7 +602,8 @@ class MavlinkService:
                 self._request_streams()
                 continue
 
-            msg = self.master.recv_match(type=watched, blocking=False)
+            with self._master_io_lock:
+                msg = self.master.recv_match(type=watched, blocking=False)
             if msg is None:
                 time.sleep(0.02)
                 continue
@@ -591,33 +618,34 @@ class MavlinkService:
         if self.master is None or self._stream_requested:
             return
 
-        try:
-            self.master.mav.request_data_stream_send(
-                self.master.target_system,
-                self.master.target_component,
-                mavutil.mavlink.MAV_DATA_STREAM_ALL,
-                5,
-                1,
-            )
-        except Exception:
-            pass
+        with self._master_io_lock:
+            try:
+                self.master.mav.request_data_stream_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                    5,
+                    1,
+                )
+            except Exception:
+                pass
 
-        try:
-            self.master.mav.command_long_send(
-                self.master.target_system,
-                self.master.target_component,
-                mavutil.mavlink.MAV_CMD_GET_HOME_POSITION,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            )
-        except Exception:
-            pass
+            try:
+                self.master.mav.command_long_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    mavutil.mavlink.MAV_CMD_GET_HOME_POSITION,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+            except Exception:
+                pass
 
         self._stream_requested = True
 
@@ -646,30 +674,105 @@ class MavlinkService:
             self.throttle_channel_source = throttle_source
 
     def _fetch_param_channel_number(self, name: str, timeout_sec: float = 1.5) -> Optional[int]:
+        value = self._fetch_param_value(name, timeout_sec)
+        if value is None:
+            return None
+        try:
+            return _clamp_channel_number(int(round(value)))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _decode_param_name(param_id: Any) -> str:
+        if isinstance(param_id, bytes):
+            return param_id.decode(errors="ignore").rstrip("\x00")
+        return str(param_id).rstrip("\x00")
+
+    def _recv_param_value_locked(
+        self,
+        name: str,
+        timeout_sec: float,
+        expected_value: Optional[float] = None,
+    ) -> Optional[float]:
         if self.master is None:
             return None
 
-        with suppress(Exception):
-            self.master.param_fetch_one(name)
-
         deadline = time.time() + timeout_sec
+        last_value: Optional[float] = None
         while time.time() < deadline and not self._stop_event.is_set():
             msg = self.master.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.2)
             if msg is None:
                 continue
-            param_id = msg.param_id
-            if isinstance(param_id, bytes):
-                param_name = param_id.decode(errors="ignore").rstrip("\x00")
-            else:
-                param_name = str(param_id).rstrip("\x00")
+            param_name = self._decode_param_name(msg.param_id)
             if param_name != name:
                 continue
             try:
-                return _clamp_channel_number(int(round(float(msg.param_value))))
+                last_value = float(msg.param_value)
             except (TypeError, ValueError):
-                return None
+                continue
+            if expected_value is None:
+                return last_value
+            if math.isclose(last_value, expected_value, abs_tol=LIDAR_STOP_DISTANCE_TOLERANCE_M):
+                return last_value
+        return last_value
 
-        return None
+    def _fetch_param_value(self, name: str, timeout_sec: float = 2.0) -> Optional[float]:
+        if self.master is None:
+            return None
+        with self._master_io_lock:
+            with suppress(Exception):
+                self.master.param_fetch_one(name)
+            return self._recv_param_value_locked(name, timeout_sec)
+
+    def get_lidar_stop_distance_m(self, timeout_sec: float = 2.0) -> float:
+        value = self._fetch_param_value(LIDAR_STOP_PARAM_NAME, timeout_sec)
+        if value is None:
+            raise RuntimeError(f"parameter {LIDAR_STOP_PARAM_NAME} was not received")
+        value = _round_lidar_stop_distance_m(value)
+        with self._lock:
+            self._lidar_stop_distance_m = value
+        return value
+
+    def set_lidar_stop_distance_m(self, value: float, timeout_sec: float = 2.5) -> float:
+        if self.master is None:
+            raise RuntimeError("MAVLink connection is not initialized")
+        if self.master.target_system == 0:
+            raise RuntimeError("Target system is unknown. Wait for heartbeat first")
+
+        requested_value = _round_lidar_stop_distance_m(value)
+
+        with self._master_io_lock:
+            self.master.param_set_send(LIDAR_STOP_PARAM_NAME, requested_value)
+            confirmed_value = self._recv_param_value_locked(
+                LIDAR_STOP_PARAM_NAME,
+                timeout_sec,
+                expected_value=requested_value,
+            )
+            if not math.isclose(
+                confirmed_value if confirmed_value is not None else math.nan,
+                requested_value,
+                abs_tol=LIDAR_STOP_DISTANCE_TOLERANCE_M,
+            ):
+                with suppress(Exception):
+                    self.master.param_fetch_one(LIDAR_STOP_PARAM_NAME)
+                confirmed_value = self._recv_param_value_locked(LIDAR_STOP_PARAM_NAME, timeout_sec)
+
+        if confirmed_value is None:
+            raise RuntimeError(f"parameter {LIDAR_STOP_PARAM_NAME} was not confirmed")
+
+        confirmed_value = _round_lidar_stop_distance_m(confirmed_value)
+        if not math.isclose(
+            confirmed_value,
+            requested_value,
+            abs_tol=LIDAR_STOP_DISTANCE_TOLERANCE_M,
+        ):
+            raise RuntimeError(
+                f"{LIDAR_STOP_PARAM_NAME} set not confirmed (requested {requested_value:.1f}, current {confirmed_value:.1f})"
+            )
+
+        with self._lock:
+            self._lidar_stop_distance_m = confirmed_value
+        return confirmed_value
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -723,6 +826,9 @@ class MavlinkService:
                     else None,
                     "remaining_pct": sys_status.get("battery_remaining"),
                 },
+                "safety": {
+                    "lidar_stop_distance_m": self._lidar_stop_distance_m,
+                },
                 "raw": {
                     "HEARTBEAT": hb,
                     "GLOBAL_POSITION_INT": pos,
@@ -746,11 +852,12 @@ class MavlinkService:
         channel_values[steer_channel_index] = self._manual_value_to_pwm(req.y)
         channel_values[throttle_channel_index] = self._manual_value_to_pwm(req.z)
 
-        self.master.mav.rc_channels_override_send(
-            self.master.target_system,
-            target_component,
-            *channel_values,
-        )
+        with self._master_io_lock:
+            self.master.mav.rc_channels_override_send(
+                self.master.target_system,
+                target_component,
+                *channel_values,
+            )
 
     @staticmethod
     def _manual_value_to_pwm(value: int) -> int:
@@ -909,6 +1016,45 @@ async def manual_control(req: ManualControlRequest) -> Dict[str, Any]:
     return {"ok": True}
 
 
+@app.get("/api/safety/lidar-stop-distance")
+async def get_lidar_stop_distance() -> Dict[str, Any]:
+    try:
+        distance_m = await asyncio.to_thread(mav.get_lidar_stop_distance_m)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "param_name": LIDAR_STOP_PARAM_NAME,
+        "distance_m": distance_m,
+        "default_m": LIDAR_STOP_DISTANCE_DEFAULT_M,
+        "step_m": LIDAR_STOP_DISTANCE_STEP_M,
+        "min_m": LIDAR_STOP_DISTANCE_MIN_M,
+        "max_m": LIDAR_STOP_DISTANCE_MAX_M,
+    }
+
+
+@app.put("/api/safety/lidar-stop-distance")
+async def update_lidar_stop_distance(req: LidarStopDistanceRequest) -> Dict[str, Any]:
+    if not _is_lidar_stop_distance_step(req.distance_m):
+        raise HTTPException(
+            status_code=400,
+            detail=f"distance_m must be in {LIDAR_STOP_DISTANCE_STEP_M:.1f} m steps",
+        )
+    try:
+        distance_m = await asyncio.to_thread(
+            mav.set_lidar_stop_distance_m,
+            req.distance_m,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "param_name": LIDAR_STOP_PARAM_NAME,
+        "distance_m": distance_m,
+        "step_m": LIDAR_STOP_DISTANCE_STEP_M,
+    }
+
+
 @app.get("/api/network/status")
 async def network_status() -> Dict[str, Any]:
     return await asyncio.to_thread(network_manager.status)
@@ -997,7 +1143,8 @@ async def ws_video_stream(websocket: WebSocket) -> None:
     await video_hub.add_viewer(websocket)
     try:
         while True:
-            # Viewers may send ping text to keep this loop responsive to disconnect.
+            # Viewer 側から ping テキストが来ても受け取り続け、
+            # 切断検知を遅らせないようにする。
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass

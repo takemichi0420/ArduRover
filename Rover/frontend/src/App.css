@@ -43,7 +43,8 @@ label {
 }
 
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+input[type="number"] {
   width: 100%;
   margin-top: 6px;
   padding: 8px;
@@ -336,6 +337,13 @@ input[type="password"] {
   margin-top: 10px;
 }
 
+.safety-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .network-scan-list {
   margin-top: 10px;
   display: grid;
@@ -380,6 +388,7 @@ input[type="password"] {
   }
 
   .network-actions,
+  .safety-actions,
   .network-scan-buttons,
   .actions {
     grid-template-columns: 1fr;
