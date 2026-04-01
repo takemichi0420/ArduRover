@@ -38,6 +38,16 @@ function fmt(value, digits = 3) {
   return Number(value).toFixed(digits);
 }
 
+function fmtClock(value) {
+  if (!Number.isFinite(value)) return "-";
+  return new Date(value * 1000).toLocaleTimeString("ja-JP", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
 async function readError(res, fallback) {
   const body = await res.json().catch(() => ({}));
   throw new Error(body.detail ?? fallback);
@@ -529,6 +539,14 @@ export default function App() {
   const hasBatteryRemainingPct = Number.isFinite(batteryRemainingPct);
   const lowBattery = hasBatteryRemainingPct && batteryRemainingPct <= LOW_BATTERY_THRESHOLD_PCT;
   const batteryDisplayText = hasBatteryRemainingPct ? `${Math.round(batteryRemainingPct)}%` : "-";
+  const failsafe = telemetry?.safety?.failsafe ?? null;
+  const failsafeActive = Boolean(failsafe?.active);
+  const failsafeReason = failsafe?.reason ?? "unknown";
+  const failsafeDisplayText = failsafe?.display_text ?? "FailSafe起動";
+  const failsafeDetail = failsafe?.detail ? String(failsafe.detail) : "";
+  const failsafeSourceText = failsafe?.source_text ? String(failsafe.source_text) : "";
+  const failsafeChangedAt = Number(failsafe?.last_change_at);
+  const failsafeChangedAtText = fmtClock(failsafeChangedAt);
 
   const sendManual = async (steer, throttle) => {
     if (!webControlEnabled) {
@@ -635,6 +653,17 @@ export default function App() {
                 <strong>{batteryDisplayText}</strong>
               </div>
 
+              {failsafeActive ? (
+                <div className={`failsafe-overlay ${failsafeReason}`}>
+                  <strong>{failsafeDisplayText}</strong>
+                  {failsafeDetail ? <span>{failsafeDetail}</span> : null}
+                  {failsafeSourceText && failsafeSourceText !== failsafeDetail ? (
+                    <span>{failsafeSourceText}</span>
+                  ) : null}
+                  <span>検知 {failsafeChangedAtText}</span>
+                </div>
+              ) : null}
+
               <div className="map-overlay map-overlay-top-right">
                 <div className="map-mode">
                   <button
@@ -694,6 +723,11 @@ export default function App() {
             <p>Yaw: {fmt(telemetry?.attitude?.yaw_rad, 3)} rad</p>
             <p>GPS Fix: {telemetry?.gps?.fix_type ?? "-"} (Sat {telemetry?.gps?.satellites_visible ?? "-"})</p>
             <p>Battery: {fmt(telemetry?.battery?.voltage_v, 2)} V ({batteryDisplayText})</p>
+            <p>FailSafe: {failsafeActive ? failsafeDisplayText : "inactive"}</p>
+            {failsafeActive && failsafeDetail ? <p className="error">{failsafeDetail}</p> : null}
+            {failsafeActive && failsafeSourceText && failsafeSourceText !== failsafeDetail ? (
+              <p className="meta">FC: {failsafeSourceText}</p>
+            ) : null}
             {lowBattery ? <p className="error">Battery 30%以下: 速やかに帰還してください</p> : null}
           </div>
 

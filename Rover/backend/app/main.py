@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 RC_PWM_MIN = 1000
 RC_PWM_MAX = 2000
 RC_CHANNEL_IGNORE = 65535
+GCS_HEARTBEAT_INTERVAL_SEC = 1.0
+MAVLINK_SOURCE_SYSTEM = 255
+MAVLINK_SOURCE_COMPONENT = mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER
 DEFAULT_RC_STEER_CHANNEL = 1
 DEFAULT_RC_THROTTLE_CHANNEL = 3
 LIDAR_STOP_PARAM_NAME = "RSTOP_DIST_M"
@@ -29,6 +32,32 @@ LIDAR_STOP_DISTANCE_STEP_M = 0.1
 LIDAR_STOP_DISTANCE_MIN_M = 0.1
 LIDAR_STOP_DISTANCE_MAX_M = 30.0
 LIDAR_STOP_DISTANCE_TOLERANCE_M = 0.051
+FAILSAFE_CONTINUE_AUTO_TEXT = "Failsafe - Continuing Auto Mode"
+FAILSAFE_REASON_BY_TRIGGER_TEXT = {
+    "Radio Failsafe": "radio",
+    "GCS Failsafe": "gcs",
+    "EKF failsafe": "ekf",
+}
+FAILSAFE_REASON_BY_CLEARED_TEXT = {
+    "Radio Failsafe Cleared": "radio",
+    "GCS Failsafe Cleared": "gcs",
+    "EKF failsafe cleared": "ekf",
+}
+FAILSAFE_REASON_LABELS = {
+    "radio": "Radio",
+    "gcs": "GCS",
+    "ekf": "EKF",
+}
+FAILSAFE_ACTIVE_DISPLAY = {
+    "radio": "RC/RC Override断絶 FailSafe起動",
+    "gcs": "Pi/GCS断絶 FailSafe起動",
+    "ekf": "EKF異常 FailSafe起動",
+}
+FAILSAFE_CLEARED_DISPLAY = {
+    "radio": "RC/RC Override断絶 FailSafe解除",
+    "gcs": "Pi/GCS断絶 FailSafe解除",
+    "ekf": "EKF異常 FailSafe解除",
+}
 
 
 def _clamp_channel_number(channel: int) -> int:
@@ -53,6 +82,25 @@ def _round_lidar_stop_distance_m(value: float) -> float:
 def _is_lidar_stop_distance_step(value: float) -> bool:
     rounded = _round_lidar_stop_distance_m(value)
     return math.isclose(float(value), rounded, abs_tol=1.0e-6)
+
+
+def _decode_statustext_text(raw: Any) -> str:
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode(errors="ignore").rstrip("\x00").strip()
+    return str(raw or "").rstrip("\x00").strip()
+
+
+def _default_failsafe_status() -> Dict[str, Any]:
+    return {
+        "active": False,
+        "reason": None,
+        "reason_label": None,
+        "display_text": None,
+        "detail": None,
+        "source_text": None,
+        "last_event": None,
+        "last_change_at": None,
+    }
 
 
 ENV_RC_STEER_CHANNEL = _env_channel_number("RC_OVERRIDE_STEER_CHANNEL")
@@ -555,6 +603,8 @@ class MavlinkService:
         self._stop_event = threading.Event()
         self._stream_requested = False
         self._lidar_stop_distance_m: Optional[float] = None
+        self._last_gcs_heartbeat_sent_at: Optional[float] = None
+        self._failsafe_status: Dict[str, Any] = _default_failsafe_status()
         self.steer_channel_number = ENV_RC_STEER_CHANNEL or DEFAULT_RC_STEER_CHANNEL
         self.throttle_channel_number = ENV_RC_THROTTLE_CHANNEL or DEFAULT_RC_THROTTLE_CHANNEL
         self.steer_channel_source = "env" if ENV_RC_STEER_CHANNEL is not None else "default"
@@ -562,7 +612,11 @@ class MavlinkService:
 
     def start(self) -> None:
         try:
-            self.master = mavutil.mavlink_connection(self.connection_string)
+            self.master = mavutil.mavlink_connection(
+                self.connection_string,
+                source_system=MAVLINK_SOURCE_SYSTEM,
+                source_component=MAVLINK_SOURCE_COMPONENT,
+            )
         except Exception as exc:
             self.master = None
             self.connected = False
@@ -586,7 +640,9 @@ class MavlinkService:
             "SYS_STATUS",
             "GPS_RAW_INT",
             "HOME_POSITION",
+            "STATUSTEXT",
         ]
+        next_gcs_heartbeat_at = 0.0
         while not self._stop_event.is_set() and self.master is not None:
             if not self.connected:
                 with self._master_io_lock:
@@ -600,7 +656,13 @@ class MavlinkService:
                     self.last_seen_at = time.time()
                 self._resolve_rc_override_channels()
                 self._request_streams()
+                next_gcs_heartbeat_at = 0.0
                 continue
+
+            now = time.time()
+            if now >= next_gcs_heartbeat_at:
+                self._send_gcs_heartbeat()
+                next_gcs_heartbeat_at = now + GCS_HEARTBEAT_INTERVAL_SEC
 
             with self._master_io_lock:
                 msg = self.master.recv_match(type=watched, blocking=False)
@@ -610,9 +672,114 @@ class MavlinkService:
 
             payload = msg.to_dict()
             msg_type = payload.get("mavpackettype", "UNKNOWN")
+            if msg_type == "STATUSTEXT":
+                payload["text"] = _decode_statustext_text(payload.get("text"))
             with self._lock:
                 self.latest[msg_type] = payload
                 self.last_seen_at = time.time()
+            if msg_type == "STATUSTEXT":
+                self._handle_statustext(payload["text"])
+
+    def _send_gcs_heartbeat(self) -> None:
+        if self.master is None:
+            return
+
+        try:
+            with self._master_io_lock:
+                self.master.mav.heartbeat_send(
+                    mavutil.mavlink.MAV_TYPE_GCS,
+                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    0,
+                    0,
+                    mavutil.mavlink.MAV_STATE_ACTIVE,
+                )
+        except Exception as exc:
+            logger.warning("GCS heartbeat send failed: %s", exc)
+            return
+
+        with self._lock:
+            self._last_gcs_heartbeat_sent_at = time.time()
+
+    def _set_failsafe_status(
+        self,
+        *,
+        active: bool,
+        reason: Optional[str],
+        source_text: str,
+        detail: Optional[str] = None,
+        event: str,
+    ) -> None:
+        reason_label = FAILSAFE_REASON_LABELS.get(reason)
+        display_lookup = FAILSAFE_ACTIVE_DISPLAY if active else FAILSAFE_CLEARED_DISPLAY
+        display_text = display_lookup.get(reason, source_text)
+
+        with self._lock:
+            current = self._failsafe_status
+            if (
+                current.get("active") == active
+                and current.get("reason") == reason
+                and current.get("detail") == detail
+                and current.get("source_text") == source_text
+                and current.get("last_event") == event
+            ):
+                return
+
+            self._failsafe_status = {
+                "active": active,
+                "reason": reason,
+                "reason_label": reason_label,
+                "display_text": display_text,
+                "detail": detail,
+                "source_text": source_text,
+                "last_event": event,
+                "last_change_at": time.time(),
+            }
+
+        log_message = display_text
+        if detail:
+            log_message = f"{display_text} ({detail})"
+        if active:
+            logger.warning("%s | source=%s", log_message, source_text)
+        else:
+            logger.info("%s | source=%s", log_message, source_text)
+
+    def _update_failsafe_detail(self, detail: str, source_text: str) -> None:
+        with self._lock:
+            current = dict(self._failsafe_status)
+            if not current.get("active") or current.get("detail") == detail:
+                return
+            current["detail"] = detail
+            current["source_text"] = source_text
+            self._failsafe_status = current
+
+        logger.warning("%s | source=%s", detail, source_text)
+
+    def _handle_statustext(self, text: str) -> None:
+        if not text:
+            return
+
+        trigger_reason = FAILSAFE_REASON_BY_TRIGGER_TEXT.get(text)
+        if trigger_reason is not None:
+            self._set_failsafe_status(
+                active=True,
+                reason=trigger_reason,
+                source_text=text,
+                event="triggered",
+            )
+            return
+
+        cleared_reason = FAILSAFE_REASON_BY_CLEARED_TEXT.get(text)
+        if cleared_reason is not None:
+            self._set_failsafe_status(
+                active=False,
+                reason=cleared_reason,
+                source_text=text,
+                event="cleared",
+            )
+            return
+
+        if text == FAILSAFE_CONTINUE_AUTO_TEXT:
+            self._update_failsafe_detail("AUTO継続中 (FS_GCS_ENABLE=2 / FS_THR_ENABLE=2)", text)
 
     def _request_streams(self) -> None:
         if self.master is None or self._stream_requested:
@@ -828,6 +995,11 @@ class MavlinkService:
                 },
                 "safety": {
                     "lidar_stop_distance_m": self._lidar_stop_distance_m,
+                    "failsafe": dict(self._failsafe_status),
+                    "gcs_heartbeat": {
+                        "interval_sec": GCS_HEARTBEAT_INTERVAL_SEC,
+                        "last_sent_at": self._last_gcs_heartbeat_sent_at,
+                    },
                 },
                 "raw": {
                     "HEARTBEAT": hb,
@@ -836,6 +1008,7 @@ class MavlinkService:
                     "GPS_RAW_INT": gps,
                     "SYS_STATUS": sys_status,
                     "HOME_POSITION": home,
+                    "STATUSTEXT": self.latest.get("STATUSTEXT", {}),
                 },
             }
             return _sanitize_for_json(snapshot)

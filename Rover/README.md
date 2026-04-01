@@ -69,6 +69,12 @@ curl http://127.0.0.1:8000/api/health
 curl http://127.0.0.1:8000/api/telemetry
 ```
 
+補足:
+
+- backend は FC 接続後、MAVLink GCS `HEARTBEAT` を 1Hz で常時送信します
+- failsafe 関連の `STATUSTEXT` を監視し、terminal に理由を出力します
+- frontend では failsafe 起動中に地図上へ理由と状態をオーバーレイ表示します
+
 ## 3. Frontend 起動
 
 Node.js 18+ が必要です。
@@ -92,7 +98,7 @@ npm run dev
 
 - `GET /api/health`: 接続状態
 - `GET /api/telemetry`: 現在のスナップショット
-- `POST /api/manual-control`: `MANUAL_CONTROL` 送信
+- `POST /api/manual-control`: `RC_CHANNELS_OVERRIDE` 送信
 - `WS /ws/telemetry`: 5Hz でテレメトリ配信
 - `WS /ws/video/publish`: スマホからJPEGフレームを受信
 - `WS /ws/video/stream`: GCSへ映像フレームを配信
@@ -125,7 +131,21 @@ npm run dev
 - Wi-Fi が見えない場合は テザリング SSID にフォールバック
 - バックエンドは定期的に優先ポリシーを再評価（既定20秒）
 
+## GCS Failsafe の既定値
+
+`workshop/Rover/mav.parm` の既定値は以下です。
+
+- `FS_ACTION = 2`
+- `FS_GCS_ENABLE = 1`
+
+意味:
+
+- `FS_ACTION = 2` は `Hold`
+- `FS_GCS_ENABLE = 1` は GCS failsafe を常時有効化します
+- そのため、`AUTO` ミッション中を含めて GCS failsafe 時に `Hold` へ切り替わります
+
 ## 注意
 
 - 手動操作が効かない場合は、SITL 側のモードや ARM 状態を確認してください。
 - `target_system=0` のままなら、正しいハートビートをまだ取得できていません。
+- Pi/companion が落ちたときは、GCS heartbeat 断と RC override 断のどちらが先に効くかで failsafe 理由が変わることがあります。
