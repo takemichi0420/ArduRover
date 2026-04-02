@@ -1,0 +1,17 @@
+[Unit]
+Description=Rover GCS Frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/GitHub/workshop/Rover/frontend
+Environment=HOST=0.0.0.0
+Environment=PORT=5173
+ExecStart=/usr/bin/npm run dev -- --host 0.0.0.0 --port 5173
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

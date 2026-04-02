@@ -94,6 +94,53 @@ npm run dev
 
 ブラウザ: `http://127.0.0.1:5173`
 
+## 3.1 Pi 起動時に backend / frontend を自動起動
+
+Pi では `systemd` を使うのが素直です。
+
+前提:
+
+- repo は `~/GitHub/workshop` に clone 済み
+- backend の venv は `workshop/Rover/backend/setup_venv.sh` で作成済み
+- frontend の依存は `workshop/Rover/frontend/npm install` 済み
+
+unit ファイルは repo に同梱しています。
+
+- backend: `Rover/backend/rover-backend.service`
+- frontend: `Rover/frontend/rover-frontend.service`
+
+インストール:
+
+```bash
+cd ~/GitHub/workshop
+sudo cp Rover/backend/rover-backend.service /etc/systemd/system/
+sudo cp Rover/frontend/rover-frontend.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable rover-backend.service rover-frontend.service
+sudo systemctl start rover-backend.service rover-frontend.service
+```
+
+確認:
+
+```bash
+systemctl status rover-backend.service
+systemctl status rover-frontend.service
+```
+
+ログ確認:
+
+```bash
+journalctl -u rover-backend.service -f
+journalctl -u rover-frontend.service -f
+```
+
+補足:
+
+- backend は `http://<pi-ip>:8000`
+- frontend は `http://<pi-ip>:5173`
+- `MAVLINK_CONNECTION` や `WIFI_INTERFACE` を変える場合は `Rover/backend/rover-backend.service` を編集してから `daemon-reload` します
+- frontend は Vite dev server を自動起動します。`5173` を変える場合は `Rover/frontend/rover-frontend.service` を編集します
+
 ## エンドポイント
 
 - `GET /api/health`: 接続状態
