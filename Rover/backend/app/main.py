@@ -26,6 +26,8 @@ MAVLINK_SOURCE_SYSTEM = 255
 MAVLINK_SOURCE_COMPONENT = mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER
 DEFAULT_RC_STEER_CHANNEL = 1
 DEFAULT_RC_THROTTLE_CHANNEL = 3
+DEFAULT_RC_PRIORITY_CHANNEL = 8
+DEFAULT_RC_PRIORITY_THRESHOLD_PWM = 1700
 LIDAR_STOP_PARAM_NAME = "RSTOP_DIST_M"
 LIDAR_STOP_DISTANCE_DEFAULT_M = 1.0
 LIDAR_STOP_DISTANCE_STEP_M = 0.1
@@ -61,6 +63,7 @@ FAILSAFE_CLEARED_DISPLAY = {
     "ekf": "EKF異常 FailSafe解除",
     "fc_link": "Pi-FC通信断 FailSafe解除",
 }
+ROVER_MODE_NAMES = mavutil.mode_mapping_bynumber(mavutil.mavlink.MAV_TYPE_GROUND_ROVER) or {}
 
 
 def _clamp_channel_number(channel: int) -> int:
@@ -76,6 +79,19 @@ def _env_channel_number(name: str) -> Optional[int]:
     if channel is None:
         return None
     return _clamp_channel_number(channel)
+
+
+def _clamp_aux_channel_number(channel: int) -> int:
+    return max(1, min(18, channel))
+
+
+def _env_aux_channel_number(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    try:
+        channel = int(raw) if raw is not None else default
+    except ValueError:
+        channel = default
+    return _clamp_aux_channel_number(channel)
 
 
 def _round_lidar_stop_distance_m(value: float) -> float:
@@ -649,6 +665,7 @@ class MavlinkService:
             "SYS_STATUS",
             "GPS_RAW_INT",
             "HOME_POSITION",
+            "RC_CHANNELS",
             "STATUSTEXT",
         ]
         next_gcs_heartbeat_at = 0.0
@@ -882,6 +899,60 @@ class MavlinkService:
             self.steer_channel_source = steer_source
             self.throttle_channel_source = throttle_source
 
+    def _rc_priority_state_locked(self) -> Dict[str, Any]:
+        rc_channels = self.latest.get("RC_CHANNELS", {})
+        raw_pwm = rc_channels.get(f"chan{RC_PRIORITY_CHANNEL}_raw")
+        try:
+            pwm = int(raw_pwm) if raw_pwm is not None else None
+        except (TypeError, ValueError):
+            pwm = None
+        active = pwm is not None and pwm >= RC_PRIORITY_THRESHOLD_PWM
+        return {
+            "channel": RC_PRIORITY_CHANNEL,
+            "threshold_pwm": RC_PRIORITY_THRESHOLD_PWM,
+            "pwm": pwm,
+            "active": active,
+        }
+
+    def _manual_target_component(self) -> int:
+        if self.master is None:
+            raise RuntimeError("MAVLink connection is not initialized")
+        if self.master.target_system == 0:
+            raise RuntimeError("Target system is unknown. Wait for heartbeat first")
+        return self.master.target_component or mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1
+
+    def _send_rc_override(self, steer_raw: int, throttle_raw: int) -> None:
+        if self.master is None or self.master.target_system == 0:
+            return
+
+        target_component = self._manual_target_component()
+        channel_values = [RC_CHANNEL_IGNORE] * 8
+        steer_channel_index = self.steer_channel_number - 1
+        throttle_channel_index = self.throttle_channel_number - 1
+        channel_values[steer_channel_index] = int(steer_raw)
+        channel_values[throttle_channel_index] = int(throttle_raw)
+
+        with self._master_io_lock:
+            self.master.mav.rc_channels_override_send(
+                self.master.target_system,
+                target_component,
+                *channel_values,
+            )
+
+    def release_manual_control(self) -> None:
+        # For channels 1-8, raw value 0 releases the override and returns control to the RC receiver.
+        self._send_rc_override(0, 0)
+
+    def set_hold_mode(self) -> None:
+        if self.master is None:
+            raise RuntimeError("MAVLink connection is not initialized")
+        if self.master.target_system == 0:
+            raise RuntimeError("Target system is unknown. Wait for heartbeat first")
+
+        self.release_manual_control()
+        with self._master_io_lock:
+            self.master.set_mode("HOLD")
+
     def _fetch_param_channel_number(self, name: str, timeout_sec: float = 1.5) -> Optional[int]:
         value = self._fetch_param_value(name, timeout_sec)
         if value is None:
@@ -991,8 +1062,10 @@ class MavlinkService:
             att = self.latest.get("ATTITUDE", {})
             gps = self.latest.get("GPS_RAW_INT", {})
             hb = self.latest.get("HEARTBEAT", {})
+            rc_channels = self.latest.get("RC_CHANNELS", {})
             sys_status = self.latest.get("SYS_STATUS", {})
             home = self.latest.get("HOME_POSITION", {})
+            rc_priority = self._rc_priority_state_locked()
             last_seen_at = self.last_seen_at
             last_seen_age_sec = (
                 max(0.0, snapshot_at - last_seen_at)
@@ -1006,6 +1079,11 @@ class MavlinkService:
             home_lat = home.get("latitude")
             home_lon = home.get("longitude")
             home_alt = home.get("altitude")
+            mode_number = hb.get("custom_mode")
+            try:
+                mode_number = int(mode_number) if mode_number is not None else None
+            except (TypeError, ValueError):
+                mode_number = None
 
             snapshot = {
                 "connected": self.connected,
@@ -1013,11 +1091,21 @@ class MavlinkService:
                 "last_seen_age_sec": last_seen_age_sec,
                 "target_system": self.master.target_system if self.master else 0,
                 "target_component": self.master.target_component if self.master else 0,
+                "mode": {
+                    "number": mode_number,
+                    "name": ROVER_MODE_NAMES.get(mode_number),
+                },
                 "rc_override": {
                     "steer_channel": self.steer_channel_number,
                     "steer_source": self.steer_channel_source,
                     "throttle_channel": self.throttle_channel_number,
                     "throttle_source": self.throttle_channel_source,
+                },
+                "rc_receiver": {
+                    "priority_channel": rc_priority["channel"],
+                    "priority_threshold_pwm": rc_priority["threshold_pwm"],
+                    "priority_pwm": rc_priority["pwm"],
+                    "priority_active": rc_priority["active"],
                 },
                 "position": {
                     "lat_deg": lat / 1e7 if lat is not None else None,
@@ -1058,6 +1146,7 @@ class MavlinkService:
                     "GLOBAL_POSITION_INT": pos,
                     "ATTITUDE": att,
                     "GPS_RAW_INT": gps,
+                    "RC_CHANNELS": rc_channels,
                     "SYS_STATUS": sys_status,
                     "HOME_POSITION": home,
                     "STATUSTEXT": self.latest.get("STATUSTEXT", {}),
@@ -1066,23 +1155,18 @@ class MavlinkService:
             return _sanitize_for_json(snapshot)
 
     def send_manual_control(self, req: ManualControlRequest) -> None:
-        if self.master is None:
-            raise RuntimeError("MAVLink connection is not initialized")
-        if self.master.target_system == 0:
-            raise RuntimeError("Target system is unknown. Wait for heartbeat first")
-        target_component = self.master.target_component or mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1
-        channel_values = [RC_CHANNEL_IGNORE] * 8
-        steer_channel_index = self.steer_channel_number - 1
-        throttle_channel_index = self.throttle_channel_number - 1
-        channel_values[steer_channel_index] = self._manual_value_to_pwm(req.y)
-        channel_values[throttle_channel_index] = self._manual_value_to_pwm(req.z)
-
-        with self._master_io_lock:
-            self.master.mav.rc_channels_override_send(
-                self.master.target_system,
-                target_component,
-                *channel_values,
+        with self._lock:
+            rc_priority = self._rc_priority_state_locked()
+        if rc_priority["active"]:
+            self.release_manual_control()
+            raise RuntimeError(
+                f"RC priority active on CH{rc_priority['channel']} ({rc_priority['pwm']} pwm). Web Control is blocked."
             )
+
+        self._send_rc_override(
+            self._manual_value_to_pwm(req.y),
+            self._manual_value_to_pwm(req.z),
+        )
 
     @staticmethod
     def _manual_value_to_pwm(value: int) -> int:
@@ -1157,6 +1241,11 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
 
 
 MAVLINK_LAST_SEEN_TIMEOUT_SEC = _env_float("MAVLINK_LAST_SEEN_TIMEOUT_SEC", 2.5, minimum=1.0)
+RC_PRIORITY_CHANNEL = _env_aux_channel_number("RC_PRIORITY_CHANNEL", DEFAULT_RC_PRIORITY_CHANNEL)
+RC_PRIORITY_THRESHOLD_PWM = min(
+    RC_PWM_MAX,
+    max(RC_PWM_MIN, _env_int("RC_PRIORITY_THRESHOLD_PWM", DEFAULT_RC_PRIORITY_THRESHOLD_PWM)),
+)
 
 
 mav = MavlinkService(
@@ -1225,12 +1314,14 @@ async def network_policy_worker() -> None:
 
 @app.get("/api/health")
 async def health() -> Dict[str, Any]:
+    rc_priority = mav.snapshot().get("rc_receiver", {})
     return {
         "ok": True,
         "connected": mav.connected,
         "mav_start_error": mav.start_error,
         "target_system": mav.master.target_system if mav.master else None,
         "target_component": mav.master.target_component if mav.master else None,
+        "rc_receiver": rc_priority,
         "rc_override": {
             "steer_channel": mav.steer_channel_number,
             "steer_source": mav.steer_channel_source,
@@ -1252,6 +1343,24 @@ async def manual_control(req: ManualControlRequest) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@app.post("/api/manual-control/release")
+async def manual_control_release() -> Dict[str, Any]:
+    try:
+        mav.release_manual_control()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/api/action/hold")
+async def action_hold() -> Dict[str, Any]:
+    try:
+        mav.set_hold_mode()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "mode": "HOLD"}
 
 
 @app.get("/api/safety/lidar-stop-distance")

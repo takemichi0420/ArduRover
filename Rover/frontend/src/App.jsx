@@ -32,6 +32,8 @@ const LOW_BATTERY_THRESHOLD_PCT = 30;
 const LIDAR_STOP_DISTANCE_STEP_M = 0.1;
 const LIDAR_STOP_DISTANCE_MIN_M = 0.1;
 const LIDAR_STOP_DISTANCE_MAX_M = 30.0;
+const WS_RECONNECT_DELAY_MS = 1000;
+const WS_FAILSAFE_GRACE_SEC = 5;
 const CLIENT_FAILSAFE_DISPLAY = {
   websocket: "WebSocket断絶 FailSafe起動",
   http: "HTTP Poll断絶 FailSafe起動"
@@ -81,6 +83,25 @@ async function postManualControl(payload) {
   if (!res.ok) {
     await readError(res, "manual-control failed");
   }
+}
+
+async function postManualControlRelease() {
+  const res = await fetch(`${API_BASE}/api/manual-control/release`, {
+    method: "POST"
+  });
+  if (!res.ok) {
+    await readError(res, "manual-control release failed");
+  }
+}
+
+async function postActionHold() {
+  const res = await fetch(`${API_BASE}/api/action/hold`, {
+    method: "POST"
+  });
+  if (!res.ok) {
+    await readError(res, "hold action failed");
+  }
+  return res.json();
 }
 
 async function fetchNetworkStatus() {
@@ -257,11 +278,15 @@ export default function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [status, setStatus] = useState("connecting");
   const [wsStatusChangedAt, setWsStatusChangedAt] = useState(() => nowSec());
+  const [wsDisconnectedSince, setWsDisconnectedSince] = useState(null);
+  const [wsFailsafeArmed, setWsFailsafeArmed] = useState(false);
   const [wsErrorMessage, setWsErrorMessage] = useState("");
   const [apiStatus, setApiStatus] = useState("idle");
   const [apiStatusChangedAt, setApiStatusChangedAt] = useState(() => nowSec());
   const [apiErrorMessage, setApiErrorMessage] = useState("");
   const [error, setError] = useState("");
+  const [controlMessage, setControlMessage] = useState("");
+  const [holdBusy, setHoldBusy] = useState(false);
   const [followMap, setFollowMap] = useState(true);
   const [baseMap, setBaseMap] = useState("satellite");
   const [webControlEnabled, setWebControlEnabled] = useState(false);
@@ -287,6 +312,28 @@ export default function App() {
   }, [status]);
 
   useEffect(() => {
+    if (status === "connected") {
+      setWsDisconnectedSince(null);
+      return;
+    }
+    if (status === "closed" || status === "error") {
+      setWsDisconnectedSince((prev) => prev ?? nowSec());
+    }
+  }, [status]);
+
+  useEffect(() => {
+    if (!Number.isFinite(wsDisconnectedSince)) {
+      setWsFailsafeArmed(false);
+      return;
+    }
+    const remainingMs = Math.max(0, (wsDisconnectedSince + WS_FAILSAFE_GRACE_SEC - nowSec()) * 1000);
+    const timerId = window.setTimeout(() => {
+      setWsFailsafeArmed(true);
+    }, remainingMs);
+    return () => window.clearTimeout(timerId);
+  }, [wsDisconnectedSince]);
+
+  useEffect(() => {
     setApiStatusChangedAt(nowSec());
   }, [apiStatus]);
 
@@ -299,34 +346,54 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const ws = new WebSocket(WS_URL);
+    let ws;
+    let stopped = false;
+    let reconnectTimerId;
 
-    ws.onopen = () => {
-      setStatus("connected");
-      setWsErrorMessage("");
-    };
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        setTelemetry(data);
-        setError("");
+    const connect = () => {
+      if (stopped) return;
+      setStatus("connecting");
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        setStatus("connected");
         setWsErrorMessage("");
-      } catch (e) {
-        const message = `WS parse error: ${String(e.message || e)}`;
-        setError(message);
-        setWsErrorMessage(message);
+      };
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setTelemetry(data);
+          setError("");
+          setWsErrorMessage("");
+        } catch (e) {
+          const message = `WS parse error: ${String(e.message || e)}`;
+          setError(message);
+          setWsErrorMessage(message);
+        }
+      };
+      ws.onerror = () => {
+        setStatus("error");
+        setWsErrorMessage("WebSocket error");
+      };
+      ws.onclose = () => {
+        setStatus("closed");
+        setWsErrorMessage("WebSocket closed");
+        if (!stopped) {
+          reconnectTimerId = window.setTimeout(connect, WS_RECONNECT_DELAY_MS);
+        }
+      };
+    };
+
+    connect();
+    return () => {
+      stopped = true;
+      if (reconnectTimerId) {
+        window.clearTimeout(reconnectTimerId);
+      }
+      if (ws) {
+        ws.close();
       }
     };
-    ws.onerror = () => {
-      setStatus("error");
-      setWsErrorMessage("WebSocket error");
-    };
-    ws.onclose = () => {
-      setStatus("closed");
-      setWsErrorMessage("WebSocket closed");
-    };
-
-    return () => ws.close();
   }, []);
 
   useEffect(() => {
@@ -585,6 +652,11 @@ export default function App() {
   const hasBatteryRemainingPct = Number.isFinite(batteryRemainingPct);
   const lowBattery = hasBatteryRemainingPct && batteryRemainingPct <= LOW_BATTERY_THRESHOLD_PCT;
   const batteryDisplayText = hasBatteryRemainingPct ? `${Math.round(batteryRemainingPct)}%` : "-";
+  const modeName = telemetry?.mode?.name ?? "-";
+  const rcPriorityActive = Boolean(telemetry?.rc_receiver?.priority_active);
+  const rcPriorityChannel = telemetry?.rc_receiver?.priority_channel ?? "-";
+  const rcPriorityPwm = telemetry?.rc_receiver?.priority_pwm ?? "-";
+  const rcPriorityText = `RC優先 CH${rcPriorityChannel} (${rcPriorityPwm} pwm)`;
   const failsafe = telemetry?.safety?.failsafe ?? null;
   const backendFailsafeActive = Boolean(failsafe?.active);
   const connectionFailsafe = useMemo(() => {
@@ -598,18 +670,28 @@ export default function App() {
         last_change_at: apiStatusChangedAt
       };
     }
-    if (!backendFailsafeActive && (status === "closed" || status === "error")) {
+    if (!backendFailsafeActive && wsFailsafeArmed && (status === "closed" || status === "error" || status === "connecting")) {
       return {
         active: true,
         reason: "websocket",
         display_text: CLIENT_FAILSAFE_DISPLAY.websocket,
-        detail: "Telemetry WebSocket が切断されました",
+        detail: `Telemetry WebSocket が ${WS_FAILSAFE_GRACE_SEC} 秒以上切断されました`,
         source_text: wsErrorMessage || `WebSocket: ${status}`,
-        last_change_at: wsStatusChangedAt
+        last_change_at: wsDisconnectedSince ?? wsStatusChangedAt
       };
     }
     return null;
-  }, [apiErrorMessage, apiStatus, apiStatusChangedAt, backendFailsafeActive, status, wsErrorMessage, wsStatusChangedAt]);
+  }, [
+    apiErrorMessage,
+    apiStatus,
+    apiStatusChangedAt,
+    backendFailsafeActive,
+    status,
+    wsDisconnectedSince,
+    wsErrorMessage,
+    wsFailsafeArmed,
+    wsStatusChangedAt
+  ]);
   const displayFailsafe = backendFailsafeActive ? failsafe : connectionFailsafe;
   const failsafeActive = Boolean(displayFailsafe?.active);
   const failsafeReason = displayFailsafe?.reason ?? "unknown";
@@ -626,6 +708,11 @@ export default function App() {
   const sendManual = async (steer, throttle) => {
     if (!webControlEnabled) {
       setError("Enable Web Control first");
+      return;
+    }
+    if (rcPriorityActive) {
+      setError(rcPriorityText);
+      setControlMessage("");
       return;
     }
     await postManualControl({
@@ -646,9 +733,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!webControlEnabled) {
+    if (!webControlEnabled || rcPriorityActive) {
       setStick({ xNorm: 0, yNorm: 0 });
-      postManualControl({ x: 0, y: 0, z: 0, r: 0, buttons: 0 }).catch(() => {});
+      postManualControlRelease().catch(() => {});
       return;
     }
 
@@ -673,7 +760,30 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timerId);
     };
-  }, [webControlEnabled, steerValue, throttleValue]);
+  }, [rcPriorityActive, steerValue, throttleValue, webControlEnabled]);
+
+  useEffect(() => {
+    if (!rcPriorityActive || !webControlEnabled) return;
+    setWebControlEnabled(false);
+    setError(`${rcPriorityText} のため Web Control を解除しました`);
+    setControlMessage("");
+  }, [rcPriorityActive, rcPriorityText, webControlEnabled]);
+
+  const handleEmergencyHold = async () => {
+    setHoldBusy(true);
+    setError("");
+    setControlMessage("");
+    setWebControlEnabled(false);
+    setStick({ xNorm: 0, yNorm: 0 });
+    try {
+      await postActionHold();
+      setControlMessage("緊急 HOLD を送信しました");
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setHoldBusy(false);
+    }
+  };
 
   return (
     <>
@@ -728,6 +838,18 @@ export default function App() {
                 <strong>{batteryDisplayText}</strong>
               </div>
 
+              <div className="map-overlay map-overlay-top-left">
+                <button
+                  type="button"
+                  className="emergency-hold-button"
+                  disabled={holdBusy}
+                  onClick={handleEmergencyHold}
+                >
+                  {holdBusy ? "HOLD送信中..." : "緊急 HOLD"}
+                </button>
+                {rcPriorityActive ? <p className="overlay-meta emergency-note">{rcPriorityText}</p> : null}
+              </div>
+
               {failsafeActive ? (
                 <div className={`failsafe-overlay ${failsafeReason}`}>
                   <strong>{failsafeDisplayText}</strong>
@@ -772,12 +894,15 @@ export default function App() {
                 <button
                   type="button"
                   className={`control-toggle${webControlEnabled ? " active" : ""}`}
+                  disabled={rcPriorityActive}
                   onClick={() => setWebControlEnabled((prev) => !prev)}
                 >
-                  {webControlEnabled ? "Web Control: ENABLED" : "Web Control: DISABLED"}
+                  {rcPriorityActive
+                    ? `Web Control: BLOCKED by RC CH${rcPriorityChannel}`
+                    : (webControlEnabled ? "Web Control: ENABLED" : "Web Control: DISABLED")}
                 </button>
                 <JoystickPad
-                  disabled={!webControlEnabled}
+                  disabled={!webControlEnabled || rcPriorityActive}
                   xNorm={stick.xNorm}
                   yNorm={stick.yNorm}
                   onChange={setStick}
@@ -796,9 +921,11 @@ export default function App() {
             <p>Home: {fmt(homeLat, 6)} / {fmt(homeLon, 6)}</p>
             <p>Rel Alt: {fmt(telemetry?.position?.relative_alt_m, 2)} m</p>
             <p>Yaw: {fmt(telemetry?.attitude?.yaw_rad, 3)} rad</p>
+            <p>Mode: {modeName}</p>
             <p>GPS Fix: {telemetry?.gps?.fix_type ?? "-"} (Sat {telemetry?.gps?.satellites_visible ?? "-"})</p>
             <p>Battery: {fmt(telemetry?.battery?.voltage_v, 2)} V ({batteryDisplayText})</p>
             <p>FC Last Seen: {lastSeenAtText} ({lastSeenAgeText})</p>
+            <p>RC Priority: {rcPriorityActive ? rcPriorityText : `inactive (CH${rcPriorityChannel})`}</p>
             <p>FailSafe: {failsafeActive ? failsafeDisplayText : "inactive"}</p>
             {failsafeActive && failsafeDetail ? <p className="error">{failsafeDetail}</p> : null}
             {failsafeActive && failsafeSourceText && failsafeSourceText !== failsafeDetail ? (
@@ -871,6 +998,7 @@ export default function App() {
               <button onClick={() => quickCommand(400, 0)}>Right</button>
               <button onClick={() => quickCommand(0, 0)}>Stop</button>
             </div>
+            {controlMessage ? <p className="meta">{controlMessage}</p> : null}
             {error ? <p className="error">{error}</p> : null}
           </div>
 

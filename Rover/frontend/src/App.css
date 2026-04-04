@@ -26,6 +26,11 @@ button:hover {
   background: #0284c7;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 h1 {
   margin: 0 0 6px;
   font-size: 1.35rem;
@@ -169,6 +174,12 @@ input[type="number"] {
   width: min(280px, 44vw);
 }
 
+.map-overlay-top-left {
+  top: 72px;
+  left: 12px;
+  width: min(220px, 34vw);
+}
+
 .map-overlay-bottom-left {
   left: 12px;
   bottom: 12px;
@@ -185,6 +196,10 @@ input[type="number"] {
   color: #e2e8f0;
   font-size: 0.85rem;
   font-weight: 600;
+}
+
+.emergency-note {
+  color: #fef3c7;
 }
 
 .battery-overlay {
@@ -317,6 +332,22 @@ input[type="number"] {
   background: #b91c1c;
 }
 
+.emergency-hold-button {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid rgba(254, 202, 202, 0.9);
+  background: rgba(220, 38, 38, 0.96);
+  color: #fff7ed;
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  box-shadow: 0 12px 24px rgba(127, 29, 29, 0.28);
+}
+
+.emergency-hold-button:hover {
+  background: rgba(185, 28, 28, 0.98);
+}
+
 .joystick-pad {
   position: relative;
   width: 170px;
@@ -432,6 +463,11 @@ input[type="number"] {
 
   .map-overlay-top-right {
     width: min(220px, 48vw);
+  }
+
+  .map-overlay-top-left {
+    top: 62px;
+    width: min(210px, 52vw);
   }
 
   .failsafe-overlay {

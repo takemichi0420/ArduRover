@@ -75,7 +75,10 @@ curl http://127.0.0.1:8000/api/telemetry
 - failsafe 関連の `STATUSTEXT` を監視し、terminal に理由を出力します
 - backend は `last_seen_at` を FC からの最終受信時刻として更新し、既定 `2.5s` 無通信なら `Pi-FC通信断 FailSafe` を出します
 - frontend では failsafe 起動中に地図上へ理由と状態をオーバーレイ表示します
-- frontend では `WebSocket closed/error` と `HTTP poll failed` もローカル failsafe として表示します
+- frontend では `HTTP poll failed` を即時、`WebSocket closed/error` を 5 秒継続したときだけローカル failsafe として表示します
+- frontend の telemetry WebSocket は切断時に自動再接続します
+- backend は既定 `CH8 >= 1700` を `RC優先` とみなし、その間は Web Control の `RC_CHANNELS_OVERRIDE` を解放して拒否します
+- frontend には地図上左上に `緊急 HOLD` ボタンがあり、override を解放して `HOLD` モードへ切り替えます
 
 ## 3. Frontend 起動
 
@@ -149,6 +152,8 @@ journalctl -u rover-frontend.service -f
 - `GET /api/health`: 接続状態
 - `GET /api/telemetry`: 現在のスナップショット
 - `POST /api/manual-control`: `RC_CHANNELS_OVERRIDE` 送信
+- `POST /api/manual-control/release`: Web Control の override を解除して RC へ戻す
+- `POST /api/action/hold`: override を解除して `HOLD` モードへ切り替える
 - `WS /ws/telemetry`: 5Hz でテレメトリ配信
 - `WS /ws/video/publish`: スマホからJPEGフレームを受信
 - `WS /ws/video/stream`: GCSへ映像フレームを配信
