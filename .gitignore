@@ -1,3 +1,8 @@
 Rover/eeprom.bin
 Rover/mav.tlog
 Rover/mav.tlog.raw
+
+Rover/backend/rvenv/
+Rover/backend/**/__pycache__/
+Rover/backend/**/*.py[cod]
+Rover_backup_*/
