@@ -47,16 +47,19 @@ FAILSAFE_REASON_LABELS = {
     "radio": "Radio",
     "gcs": "GCS",
     "ekf": "EKF",
+    "fc_link": "Pi-FC Link",
 }
 FAILSAFE_ACTIVE_DISPLAY = {
     "radio": "RC/RC Override断絶 FailSafe起動",
     "gcs": "Pi/GCS断絶 FailSafe起動",
     "ekf": "EKF異常 FailSafe起動",
+    "fc_link": "Pi-FC通信断 FailSafe起動",
 }
 FAILSAFE_CLEARED_DISPLAY = {
     "radio": "RC/RC Override断絶 FailSafe解除",
     "gcs": "Pi/GCS断絶 FailSafe解除",
     "ekf": "EKF異常 FailSafe解除",
+    "fc_link": "Pi-FC通信断 FailSafe解除",
 }
 
 
@@ -101,6 +104,12 @@ def _default_failsafe_status() -> Dict[str, Any]:
         "last_event": None,
         "last_change_at": None,
     }
+
+
+def _format_clock(ts: Optional[float]) -> str:
+    if ts is None or not math.isfinite(ts):
+        return "-"
+    return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
 ENV_RC_STEER_CHANNEL = _env_channel_number("RC_OVERRIDE_STEER_CHANNEL")
@@ -660,6 +669,7 @@ class MavlinkService:
                 continue
 
             now = time.time()
+            self._sync_mavlink_timeout_failsafe(now)
             if now >= next_gcs_heartbeat_at:
                 self._send_gcs_heartbeat()
                 next_gcs_heartbeat_at = now + GCS_HEARTBEAT_INTERVAL_SEC
@@ -679,6 +689,38 @@ class MavlinkService:
                 self.last_seen_at = time.time()
             if msg_type == "STATUSTEXT":
                 self._handle_statustext(payload["text"])
+
+    def _sync_mavlink_timeout_failsafe(self, now: Optional[float] = None) -> None:
+        check_at = time.time() if now is None else now
+        with self._lock:
+            last_seen_at = self.last_seen_at
+            current = dict(self._failsafe_status)
+
+        if last_seen_at is None:
+            return
+
+        is_stale = (check_at - last_seen_at) >= MAVLINK_LAST_SEEN_TIMEOUT_SEC
+        if is_stale:
+            # FC 由来の failsafe 文言を受信済みなら、そちらを優先表示する。
+            if current.get("active") and current.get("reason") not in (None, "fc_link"):
+                return
+            self._set_failsafe_status(
+                active=True,
+                reason="fc_link",
+                source_text="Pi-FC MAVLink timeout",
+                detail=f"最終受信 {_format_clock(last_seen_at)}",
+                event="mavlink_timeout",
+            )
+            return
+
+        if current.get("active") and current.get("reason") == "fc_link":
+            self._set_failsafe_status(
+                active=False,
+                reason="fc_link",
+                source_text="Pi-FC MAVLink recovered",
+                detail=f"最終受信 {_format_clock(last_seen_at)}",
+                event="mavlink_recovered",
+            )
 
     def _send_gcs_heartbeat(self) -> None:
         if self.master is None:
@@ -942,6 +984,8 @@ class MavlinkService:
         return confirmed_value
 
     def snapshot(self) -> Dict[str, Any]:
+        snapshot_at = time.time()
+        self._sync_mavlink_timeout_failsafe(snapshot_at)
         with self._lock:
             pos = self.latest.get("GLOBAL_POSITION_INT", {})
             att = self.latest.get("ATTITUDE", {})
@@ -949,6 +993,12 @@ class MavlinkService:
             hb = self.latest.get("HEARTBEAT", {})
             sys_status = self.latest.get("SYS_STATUS", {})
             home = self.latest.get("HOME_POSITION", {})
+            last_seen_at = self.last_seen_at
+            last_seen_age_sec = (
+                max(0.0, snapshot_at - last_seen_at)
+                if last_seen_at is not None
+                else None
+            )
 
             lat = pos.get("lat")
             lon = pos.get("lon")
@@ -959,7 +1009,8 @@ class MavlinkService:
 
             snapshot = {
                 "connected": self.connected,
-                "last_seen_at": self.last_seen_at,
+                "last_seen_at": last_seen_at,
+                "last_seen_age_sec": last_seen_age_sec,
                 "target_system": self.master.target_system if self.master else 0,
                 "target_component": self.master.target_component if self.master else 0,
                 "rc_override": {
@@ -996,6 +1047,7 @@ class MavlinkService:
                 "safety": {
                     "lidar_stop_distance_m": self._lidar_stop_distance_m,
                     "failsafe": dict(self._failsafe_status),
+                    "mavlink_timeout_sec": MAVLINK_LAST_SEEN_TIMEOUT_SEC,
                     "gcs_heartbeat": {
                         "interval_sec": GCS_HEARTBEAT_INTERVAL_SEC,
                         "last_sent_at": self._last_gcs_heartbeat_sent_at,
@@ -1092,6 +1144,19 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(minimum, default)
+    try:
+        return max(minimum, float(raw))
+    except ValueError:
+        return max(minimum, default)
+
+
+MAVLINK_LAST_SEEN_TIMEOUT_SEC = _env_float("MAVLINK_LAST_SEEN_TIMEOUT_SEC", 2.5, minimum=1.0)
 
 
 mav = MavlinkService(

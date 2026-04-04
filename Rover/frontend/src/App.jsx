@@ -32,6 +32,10 @@ const LOW_BATTERY_THRESHOLD_PCT = 30;
 const LIDAR_STOP_DISTANCE_STEP_M = 0.1;
 const LIDAR_STOP_DISTANCE_MIN_M = 0.1;
 const LIDAR_STOP_DISTANCE_MAX_M = 30.0;
+const CLIENT_FAILSAFE_DISPLAY = {
+  websocket: "WebSocket断絶 FailSafe起動",
+  http: "HTTP Poll断絶 FailSafe起動"
+};
 
 function fmt(value, digits = 3) {
   if (value === null || value === undefined) return "-";
@@ -46,6 +50,21 @@ function fmtClock(value) {
     minute: "2-digit",
     second: "2-digit"
   });
+}
+
+function nowSec() {
+  return Date.now() / 1000;
+}
+
+function fmtAgeSec(value) {
+  if (!Number.isFinite(value)) return "-";
+  return `${value.toFixed(value >= 10 ? 0 : 1)} s前`;
+}
+
+function toFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") return Number.NaN;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
 async function readError(res, fallback) {
@@ -237,7 +256,11 @@ function JoystickPad({ disabled, xNorm, yNorm, onChange, onRelease }) {
 export default function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [status, setStatus] = useState("connecting");
+  const [wsStatusChangedAt, setWsStatusChangedAt] = useState(() => nowSec());
+  const [wsErrorMessage, setWsErrorMessage] = useState("");
   const [apiStatus, setApiStatus] = useState("idle");
+  const [apiStatusChangedAt, setApiStatusChangedAt] = useState(() => nowSec());
+  const [apiErrorMessage, setApiErrorMessage] = useState("");
   const [error, setError] = useState("");
   const [followMap, setFollowMap] = useState(true);
   const [baseMap, setBaseMap] = useState("satellite");
@@ -260,6 +283,14 @@ export default function App() {
   const sendingRef = useRef(false);
 
   useEffect(() => {
+    setWsStatusChangedAt(nowSec());
+  }, [status]);
+
+  useEffect(() => {
+    setApiStatusChangedAt(nowSec());
+  }, [apiStatus]);
+
+  useEffect(() => {
     const mobileLike =
       window.matchMedia("(max-width: 960px)").matches ||
       /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -270,18 +301,30 @@ export default function App() {
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
 
-    ws.onopen = () => setStatus("connected");
+    ws.onopen = () => {
+      setStatus("connected");
+      setWsErrorMessage("");
+    };
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         setTelemetry(data);
         setError("");
+        setWsErrorMessage("");
       } catch (e) {
-        setError(`WS parse error: ${String(e.message || e)}`);
+        const message = `WS parse error: ${String(e.message || e)}`;
+        setError(message);
+        setWsErrorMessage(message);
       }
     };
-    ws.onerror = () => setStatus("error");
-    ws.onclose = () => setStatus("closed");
+    ws.onerror = () => {
+      setStatus("error");
+      setWsErrorMessage("WebSocket error");
+    };
+    ws.onclose = () => {
+      setStatus("closed");
+      setWsErrorMessage("WebSocket closed");
+    };
 
     return () => ws.close();
   }, []);
@@ -300,11 +343,14 @@ export default function App() {
         if (!stopped) {
           setTelemetry(data);
           setApiStatus("ok");
+          setApiErrorMessage("");
         }
       } catch (e) {
         if (!stopped) {
+          const message = `API poll failed: ${String(e.message || e)}`;
           setApiStatus("error");
-          setError((prev) => prev || `API poll failed: ${String(e.message || e)}`);
+          setApiErrorMessage(message);
+          setError((prev) => prev || message);
         }
       } finally {
         if (!stopped) {
@@ -540,13 +586,42 @@ export default function App() {
   const lowBattery = hasBatteryRemainingPct && batteryRemainingPct <= LOW_BATTERY_THRESHOLD_PCT;
   const batteryDisplayText = hasBatteryRemainingPct ? `${Math.round(batteryRemainingPct)}%` : "-";
   const failsafe = telemetry?.safety?.failsafe ?? null;
-  const failsafeActive = Boolean(failsafe?.active);
-  const failsafeReason = failsafe?.reason ?? "unknown";
-  const failsafeDisplayText = failsafe?.display_text ?? "FailSafe起動";
-  const failsafeDetail = failsafe?.detail ? String(failsafe.detail) : "";
-  const failsafeSourceText = failsafe?.source_text ? String(failsafe.source_text) : "";
-  const failsafeChangedAt = Number(failsafe?.last_change_at);
+  const backendFailsafeActive = Boolean(failsafe?.active);
+  const connectionFailsafe = useMemo(() => {
+    if (!backendFailsafeActive && apiStatus === "error") {
+      return {
+        active: true,
+        reason: "http",
+        display_text: CLIENT_FAILSAFE_DISPLAY.http,
+        detail: "Pi backend へのHTTP pollに失敗しました",
+        source_text: apiErrorMessage || "API poll failed",
+        last_change_at: apiStatusChangedAt
+      };
+    }
+    if (!backendFailsafeActive && (status === "closed" || status === "error")) {
+      return {
+        active: true,
+        reason: "websocket",
+        display_text: CLIENT_FAILSAFE_DISPLAY.websocket,
+        detail: "Telemetry WebSocket が切断されました",
+        source_text: wsErrorMessage || `WebSocket: ${status}`,
+        last_change_at: wsStatusChangedAt
+      };
+    }
+    return null;
+  }, [apiErrorMessage, apiStatus, apiStatusChangedAt, backendFailsafeActive, status, wsErrorMessage, wsStatusChangedAt]);
+  const displayFailsafe = backendFailsafeActive ? failsafe : connectionFailsafe;
+  const failsafeActive = Boolean(displayFailsafe?.active);
+  const failsafeReason = displayFailsafe?.reason ?? "unknown";
+  const failsafeDisplayText = displayFailsafe?.display_text ?? "FailSafe起動";
+  const failsafeDetail = displayFailsafe?.detail ? String(displayFailsafe.detail) : "";
+  const failsafeSourceText = displayFailsafe?.source_text ? String(displayFailsafe.source_text) : "";
+  const failsafeChangedAt = toFiniteNumber(displayFailsafe?.last_change_at);
   const failsafeChangedAtText = fmtClock(failsafeChangedAt);
+  const lastSeenAt = toFiniteNumber(telemetry?.last_seen_at);
+  const lastSeenAtText = fmtClock(lastSeenAt);
+  const lastSeenAgeSec = toFiniteNumber(telemetry?.last_seen_age_sec);
+  const lastSeenAgeText = fmtAgeSec(lastSeenAgeSec);
 
   const sendManual = async (steer, throttle) => {
     if (!webControlEnabled) {
@@ -723,6 +798,7 @@ export default function App() {
             <p>Yaw: {fmt(telemetry?.attitude?.yaw_rad, 3)} rad</p>
             <p>GPS Fix: {telemetry?.gps?.fix_type ?? "-"} (Sat {telemetry?.gps?.satellites_visible ?? "-"})</p>
             <p>Battery: {fmt(telemetry?.battery?.voltage_v, 2)} V ({batteryDisplayText})</p>
+            <p>FC Last Seen: {lastSeenAtText} ({lastSeenAgeText})</p>
             <p>FailSafe: {failsafeActive ? failsafeDisplayText : "inactive"}</p>
             {failsafeActive && failsafeDetail ? <p className="error">{failsafeDetail}</p> : null}
             {failsafeActive && failsafeSourceText && failsafeSourceText !== failsafeDetail ? (

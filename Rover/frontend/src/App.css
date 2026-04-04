@@ -259,6 +259,18 @@ input[type="number"] {
   background: rgba(69, 26, 3, 0.94);
 }
 
+.failsafe-overlay.fc_link {
+  background: rgba(49, 46, 129, 0.94);
+}
+
+.failsafe-overlay.websocket {
+  background: rgba(30, 64, 175, 0.94);
+}
+
+.failsafe-overlay.http {
+  background: rgba(6, 78, 59, 0.94);
+}
+
 @keyframes battery-alert-blink {
   0%,
   100% {

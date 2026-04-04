@@ -73,7 +73,9 @@ curl http://127.0.0.1:8000/api/telemetry
 
 - backend は FC 接続後、MAVLink GCS `HEARTBEAT` を 1Hz で常時送信します
 - failsafe 関連の `STATUSTEXT` を監視し、terminal に理由を出力します
+- backend は `last_seen_at` を FC からの最終受信時刻として更新し、既定 `2.5s` 無通信なら `Pi-FC通信断 FailSafe` を出します
 - frontend では failsafe 起動中に地図上へ理由と状態をオーバーレイ表示します
+- frontend では `WebSocket closed/error` と `HTTP poll failed` もローカル failsafe として表示します
 
 ## 3. Frontend 起動
 
