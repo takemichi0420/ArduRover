@@ -794,10 +794,22 @@ export default function App() {
         <section className="top-stage">
           <section className="pane camera-pane">
             <div className="pane-head">
-              <h1>Rover GCS</h1>
-              <p className="meta">WebSocket: {status}</p>
-              <p className="meta">HTTP Poll: {apiStatus}</p>
-              <p className="meta">SYS/COMP: {telemetry?.target_system ?? "-"} / {telemetry?.target_component ?? "-"}</p>
+              <div className="pane-head-main">
+                <h1>Rover GCS</h1>
+                <p className="meta">WebSocket: {status}</p>
+                <p className="meta">HTTP Poll: {apiStatus}</p>
+                <p className="meta">SYS/COMP: {telemetry?.target_system ?? "-"} / {telemetry?.target_component ?? "-"}</p>
+              </div>
+              {failsafeActive ? (
+                <div className={`failsafe-banner ${failsafeReason}`}>
+                  <strong>{failsafeDisplayText}</strong>
+                  {failsafeDetail ? <span>{failsafeDetail}</span> : null}
+                  {failsafeSourceText && failsafeSourceText !== failsafeDetail ? (
+                    <span>{failsafeSourceText}</span>
+                  ) : null}
+                  <span>検知 {failsafeChangedAtText}</span>
+                </div>
+              ) : null}
             </div>
             <iframe
               className="camera-frame camera-iframe camera-stage-frame"
@@ -849,17 +861,6 @@ export default function App() {
                 </button>
                 {rcPriorityActive ? <p className="overlay-meta emergency-note">{rcPriorityText}</p> : null}
               </div>
-
-              {failsafeActive ? (
-                <div className={`failsafe-overlay ${failsafeReason}`}>
-                  <strong>{failsafeDisplayText}</strong>
-                  {failsafeDetail ? <span>{failsafeDetail}</span> : null}
-                  {failsafeSourceText && failsafeSourceText !== failsafeDetail ? (
-                    <span>{failsafeSourceText}</span>
-                  ) : null}
-                  <span>検知 {failsafeChangedAtText}</span>
-                </div>
-              ) : null}
 
               <div className="map-overlay map-overlay-top-right">
                 <div className="map-mode">

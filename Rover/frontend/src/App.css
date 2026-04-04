@@ -111,6 +111,17 @@ input[type="number"] {
   gap: 8px;
 }
 
+.pane-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 42%);
+  gap: 12px;
+  align-items: start;
+}
+
+.pane-head-main {
+  min-width: 0;
+}
+
 .camera-stage-frame {
   width: 100%;
   flex: 1;
@@ -234,55 +245,49 @@ input[type="number"] {
   animation: battery-alert-blink 0.9s step-start infinite;
 }
 
-.failsafe-overlay {
-  position: absolute;
-  top: 14px;
-  left: 50%;
-  z-index: 470;
+.failsafe-banner {
   display: grid;
   gap: 4px;
-  width: min(420px, calc(100% - 180px));
+  min-width: 0;
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid rgba(254, 202, 202, 0.9);
   background: rgba(127, 29, 29, 0.92);
   color: #fff7ed;
   box-shadow: 0 14px 36px rgba(15, 23, 42, 0.28);
-  transform: translateX(-50%);
-  pointer-events: none;
 }
 
-.failsafe-overlay strong {
+.failsafe-banner strong {
   font-size: 1rem;
   line-height: 1.2;
 }
 
-.failsafe-overlay span {
+.failsafe-banner span {
   font-size: 0.84rem;
   line-height: 1.25;
 }
 
-.failsafe-overlay.gcs {
+.failsafe-banner.gcs {
   background: rgba(154, 52, 18, 0.94);
 }
 
-.failsafe-overlay.radio {
+.failsafe-banner.radio {
   background: rgba(127, 29, 29, 0.94);
 }
 
-.failsafe-overlay.ekf {
+.failsafe-banner.ekf {
   background: rgba(69, 26, 3, 0.94);
 }
 
-.failsafe-overlay.fc_link {
+.failsafe-banner.fc_link {
   background: rgba(49, 46, 129, 0.94);
 }
 
-.failsafe-overlay.websocket {
+.failsafe-banner.websocket {
   background: rgba(30, 64, 175, 0.94);
 }
 
-.failsafe-overlay.http {
+.failsafe-banner.http {
   background: rgba(6, 78, 59, 0.94);
 }
 
@@ -457,6 +462,10 @@ input[type="number"] {
     padding: 8px;
   }
 
+  .pane-head {
+    grid-template-columns: 1fr;
+  }
+
   .camera-stage-frame {
     min-height: 250px;
   }
@@ -468,11 +477,6 @@ input[type="number"] {
   .map-overlay-top-left {
     top: 62px;
     width: min(210px, 52vw);
-  }
-
-  .failsafe-overlay {
-    top: 62px;
-    width: min(320px, calc(100% - 24px));
   }
 
   .joystick-pad {
