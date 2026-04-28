@@ -77,7 +77,11 @@ curl http://127.0.0.1:8000/api/telemetry
 - frontend では failsafe 起動中に地図上へ理由と状態をオーバーレイ表示します
 - frontend では `HTTP poll failed` を即時、`WebSocket closed/error` を 5 秒継続したときだけローカル failsafe として表示します
 - frontend の telemetry WebSocket は切断時に自動再接続します
-- backend は既定 `CH8 >= 1700` を `RC優先` とみなし、その間は Web Control の `RC_CHANNELS_OVERRIDE` を解放して拒否します
+- 優先順は `RC > MissionPlanner(GCS) = Web GCS` です。MissionPlanner と Web GCS は同列として扱い、MissionPlanner が開いているだけでは Web Control を止めません
+- backend は既定 `CH7 <= 1300` を `RC優先` とみなし、その間は Web Control の `RC_CHANNELS_OVERRIDE` を解放して拒否します
+- `Rover/mav.parm` では `RC7_OPTION = 46` (`RC_OVERRIDE_ENABLE`) を使います。CH7 LOW で MissionPlanner/Web GCS の override をFC側で禁止し、CH7 HIGH でGCS overrideを許可します
+- `CH5` は `MODE_CH` として使い、3ポジションで `MANUAL / AUTO / GUIDED` を切り替えます
+- `CH8` は2ポジションの緊急HOLDとして使い、`RC8_OPTION = 54` (`HOLD`) でON側は必ず `HOLD` に入ります
 - frontend には地図上左上に `緊急 HOLD` ボタンがあり、override を解放して `HOLD` モードへ切り替えます
 
 ## 3. Frontend 起動

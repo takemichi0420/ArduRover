@@ -26,8 +26,9 @@ MAVLINK_SOURCE_SYSTEM = 255
 MAVLINK_SOURCE_COMPONENT = mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER
 DEFAULT_RC_STEER_CHANNEL = 1
 DEFAULT_RC_THROTTLE_CHANNEL = 3
-DEFAULT_RC_PRIORITY_CHANNEL = 8
-DEFAULT_RC_PRIORITY_THRESHOLD_PWM = 1700
+DEFAULT_RC_PRIORITY_CHANNEL = 7
+DEFAULT_RC_PRIORITY_THRESHOLD_PWM = 1300
+DEFAULT_RC_PRIORITY_ACTIVE_LOW = True
 LIDAR_STOP_PARAM_NAME = "RSTOP_DIST_M"
 LIDAR_STOP_DISTANCE_DEFAULT_M = 1.0
 LIDAR_STOP_DISTANCE_STEP_M = 0.1
@@ -906,10 +907,16 @@ class MavlinkService:
             pwm = int(raw_pwm) if raw_pwm is not None else None
         except (TypeError, ValueError):
             pwm = None
-        active = pwm is not None and pwm >= RC_PRIORITY_THRESHOLD_PWM
+        if pwm is None:
+            active = False
+        elif RC_PRIORITY_ACTIVE_LOW:
+            active = pwm <= RC_PRIORITY_THRESHOLD_PWM
+        else:
+            active = pwm >= RC_PRIORITY_THRESHOLD_PWM
         return {
             "channel": RC_PRIORITY_CHANNEL,
             "threshold_pwm": RC_PRIORITY_THRESHOLD_PWM,
+            "active_low": RC_PRIORITY_ACTIVE_LOW,
             "pwm": pwm,
             "active": active,
         }
@@ -1240,12 +1247,20 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
         return max(minimum, default)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 MAVLINK_LAST_SEEN_TIMEOUT_SEC = _env_float("MAVLINK_LAST_SEEN_TIMEOUT_SEC", 2.5, minimum=1.0)
 RC_PRIORITY_CHANNEL = _env_aux_channel_number("RC_PRIORITY_CHANNEL", DEFAULT_RC_PRIORITY_CHANNEL)
 RC_PRIORITY_THRESHOLD_PWM = min(
     RC_PWM_MAX,
     max(RC_PWM_MIN, _env_int("RC_PRIORITY_THRESHOLD_PWM", DEFAULT_RC_PRIORITY_THRESHOLD_PWM)),
 )
+RC_PRIORITY_ACTIVE_LOW = _env_bool("RC_PRIORITY_ACTIVE_LOW", DEFAULT_RC_PRIORITY_ACTIVE_LOW)
 
 
 mav = MavlinkService(

@@ -12,6 +12,9 @@ Environment=MAVLINK_CONNECTION=udpin:127.0.0.1:14551
 Environment=WIFI_INTERFACE=wlan0
 Environment=NETWORK_POLICY_PATH=/home/pi/.config/rover-gcs/network_policy.json
 Environment=NETWORK_POLICY_INTERVAL_SEC=20
+Environment=RC_PRIORITY_CHANNEL=7
+Environment=RC_PRIORITY_THRESHOLD_PWM=1300
+Environment=RC_PRIORITY_ACTIVE_LOW=1
 ExecStart=/home/pi/GitHub/workshop/Rover/backend/rvenv/bin/python -m uvicorn app.main:app --app-dir /home/pi/GitHub/workshop/Rover/backend --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=2
