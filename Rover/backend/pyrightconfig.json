@@ -1,0 +1,15 @@
+{
+  "venvPath": ".",
+  "venv": "rvenv",
+  "pythonVersion": "3.11",
+  "extraPaths": [
+    "./rvenv/lib/python3.11/site-packages"
+  ],
+  "include": [
+    "app"
+  ],
+  "exclude": [
+    "rvenv",
+    "**/__pycache__"
+  ]
+}

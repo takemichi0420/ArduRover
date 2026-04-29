@@ -1,0 +1,10 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/Rover/backend/rvenv/bin/python",
+  "python.pythonPath": "${workspaceFolder}/Rover/backend/rvenv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/Rover/backend/rvenv/lib/python3.11/site-packages"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}/Rover/backend/rvenv/lib/python3.11/site-packages"
+  ]
+}

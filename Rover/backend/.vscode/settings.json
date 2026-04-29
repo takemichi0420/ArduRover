@@ -1,0 +1,10 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/rvenv/bin/python",
+  "python.pythonPath": "${workspaceFolder}/rvenv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/rvenv/lib/python3.11/site-packages"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}/rvenv/lib/python3.11/site-packages"
+  ]
+}
